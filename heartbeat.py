@@ -59,7 +59,16 @@ def main() -> None:
         data=json.dumps({"version": open("/opt/pscyber-collector/VERSION").read().strip(), "facts": facts}).encode(),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {cfg['api_secret']}"}, method="POST")
     with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
-        r.read()
+        reply = json.loads(r.read() or b"{}")
+    # The SOC may change the site-agent enrolment password; keep ours current so
+    # `pscyber-collector site-agent-command` always prints the working one.
+    pw = reply.get("site_agent_enroll_password")
+    if pw is not None and pw != cfg.get("site_agent_enroll_password"):
+        cfg["site_agent_enroll_password"] = pw
+        tmp = f"{ETC}/config.json.new"
+        with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+            json.dump(cfg, f, indent=1)
+        os.replace(tmp, f"{ETC}/config.json")
 
 
 if __name__ == "__main__":
