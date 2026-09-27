@@ -92,8 +92,8 @@ Microsoft 365 cannot send logs. With `o365.sh`, the Wazuh agent on this collecto
 them through the same tunnel. Proseth gives you the exact command with your IDs:
 
 ```bash
-curl -sk https://<platform>/collector/o365.sh -o o365.sh && \
-  sudo PSCYBER_O365_TENANT='<tenant id>' PSCYBER_O365_CLIENT='<client id>' bash o365.sh
+curl -sO https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-collector/main/o365.sh
+sudo PSCYBER_O365_TENANT='<Directory (tenant) ID>' PSCYBER_O365_CLIENT='<Application (client) ID>' bash o365.sh
 ```
 
 It asks for the app's client secret (typing hidden) and keeps it only on this box, in a
