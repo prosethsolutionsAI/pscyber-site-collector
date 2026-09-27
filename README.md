@@ -84,6 +84,26 @@ pscyber-collector site-agent-command   # the command to put Windows/Linux agents
 - Nothing in this repository is specific to any customer; everything site-specific is
   delivered at enrolment.
 
+## Microsoft 365 audit logs (optional)
+
+Microsoft 365 cannot send logs. With `o365.sh`, the Wazuh agent on this collector
+**fetches** the customer's Office 365 audit logs from Microsoft every minute
+(outbound HTTPS 443 to `login.microsoftonline.com` and `manage.office.com`) and sends
+them through the same tunnel. Proseth gives you the exact command with your IDs:
+
+```bash
+curl -sk https://<platform>/collector/o365.sh -o o365.sh && \
+  sudo PSCYBER_O365_TENANT='<tenant id>' PSCYBER_O365_CLIENT='<client id>' bash o365.sh
+```
+
+It asks for the app's client secret (typing hidden) and keeps it only on this box, in a
+file only Wazuh can read. Before changing anything it checks Microsoft is reachable, the
+secret works and the app has `ActivityFeed.Read`; if the agent will not start with the
+new setting, the previous configuration is put back. Run it again to change the log
+types or a renewed secret; `sudo PSCYBER_O365_REMOVE=1 bash o365.sh` stops collecting and
+deletes the secret. The customer-side steps (the app to create) are in the site
+onboarding guide, `microsoft365.md`.
+
 ## Remove
 
 ```bash
@@ -98,4 +118,5 @@ Then ask Proseth to revoke the collector in the SOC platform.
 |---|---|
 | `install.sh` | Installer and setup wizard |
 | `heartbeat.py` | Health report to the SOC platform (runs every minute) |
+| `o365.sh` | Optional: fetch the customer's Microsoft 365 audit logs (asks for the secret, tests first) |
 | `VERSION` | Collector version |
