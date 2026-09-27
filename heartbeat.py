@@ -53,7 +53,14 @@ def main() -> None:
         "snmptrap_log_bytes": traps,
         "os": platform.platform(),
     }
-    ctx = ssl.create_default_context(cafile=f"{ETC}/platform.pem") if os.path.exists(f"{ETC}/platform.pem") else ssl._create_unverified_context()
+    if os.path.exists(f"{ETC}/platform.pem"):
+        # Pinned: only the exact certificate saved at install is trusted. The name
+        # check is off because a "public" collector reaches the platform through a
+        # NAT address that is not in that certificate - the pin is the stronger check.
+        ctx = ssl.create_default_context(cafile=f"{ETC}/platform.pem")
+        ctx.check_hostname = False
+    else:
+        ctx = ssl._create_unverified_context()
     req = urllib.request.Request(
         f"{platform_url}/api/collectors/heartbeat",
         data=json.dumps({"version": open("/opt/pscyber-collector/VERSION").read().strip(), "facts": facts}).encode(),

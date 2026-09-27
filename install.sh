@@ -16,7 +16,7 @@
 set -uo pipefail
 
 # Not "VERSION": sourcing /etc/os-release below would overwrite it with the OS version.
-COLLECTOR_VERSION="1.0.3"
+COLLECTOR_VERSION="1.0.4"
 WAZUH_AGENT_VERSION="4.14.7"
 ETC=/etc/pscyber-collector
 LOGDIR=/var/log/pscyber
