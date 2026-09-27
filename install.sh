@@ -15,7 +15,8 @@
 # token to move the collector to a new box). `pscyber-collector uninstall` removes it.
 set -uo pipefail
 
-VERSION="1.0.0"
+# Not "VERSION": sourcing /etc/os-release below would overwrite it with the OS version.
+COLLECTOR_VERSION="1.0.1"
 WAZUH_AGENT_VERSION="4.14.7"
 ETC=/etc/pscyber-collector
 LOGDIR=/var/log/pscyber
@@ -35,7 +36,7 @@ CA_FP_EXPECTED="${PSCYBER_CA_FINGERPRINT:-}"
 INTERACTIVE=1; [ -n "$PLATFORM" ] && [ -n "$TOKEN" ] && INTERACTIVE=0
 
 echo
-echo "  PSCyber Site Collector $VERSION"
+echo "  PSCyber Site Collector $COLLECTOR_VERSION"
 echo "  Forwards this site's syslog, SNMP traps and Wazuh agents to the Proseth SOC."
 echo
 [ -n "$PLATFORM" ] || read -r -p "  Platform URL (given by Proseth, e.g. https://soc.example.com:8443): " PLATFORM
@@ -191,10 +192,13 @@ authCommunity log $COMMUNITY
 format2 TRAP from %B [%b]: %v\n
 EOF
 mkdir -p /etc/systemd/system/snmptrapd.service.d
+# Log traps to syslog facility local5 (rsyslog writes them for Wazuh). No -p pidfile:
+# on Ubuntu 26.04 the unit runs unprivileged and cannot write one ("fopen: Permission
+# denied"); keep the listen addresses the distribution's unit uses.
 cat > /etc/systemd/system/snmptrapd.service.d/pscyber.conf <<'EOF'
 [Service]
 ExecStart=
-ExecStart=/usr/sbin/snmptrapd -Ls5 -f -p /run/snmptrapd.pid
+ExecStart=/usr/sbin/snmptrapd -Ls5 -f udp:162 udp6:162
 EOF
 
 # ------------------------------------------------------------------ Wazuh agent (through the tunnel)
@@ -244,7 +248,7 @@ ok "agent key imported ($AGENT_NAME)"
 say "installing the heartbeat and the pscyber-collector command"
 mkdir -p /opt/pscyber-collector
 curl -sfk "$PLATFORM/collector/files/heartbeat.py" -o /opt/pscyber-collector/heartbeat.py || die "cannot fetch heartbeat.py"
-echo "$VERSION" > /opt/pscyber-collector/VERSION
+echo "$COLLECTOR_VERSION" > /opt/pscyber-collector/VERSION
 cat > /etc/systemd/system/pscyber-heartbeat.service <<'EOF'
 [Unit]
 Description=PSCyber collector heartbeat to the SOC platform
@@ -310,7 +314,7 @@ sleep 15
 python3 /opt/pscyber-collector/heartbeat.py >/dev/null 2>&1 || warn "first heartbeat failed - the platform will show it offline until one succeeds"
 
 echo
-ok "PSCyber Site Collector $VERSION installed for '$TENANT'"
+ok "PSCyber Site Collector $COLLECTOR_VERSION installed for '$TENANT'"
 echo "     Point switches/firewalls syslog at:   $(hostname -I | awk '{print $1}') UDP/TCP 514"
 echo "     Point SNMP traps at:                  $(hostname -I | awk '{print $1}') UDP 162 (community '$COMMUNITY')"
 echo "     Site Wazuh agents:                    pscyber-collector site-agent-command"
