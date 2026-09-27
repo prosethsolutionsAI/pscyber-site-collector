@@ -16,7 +16,7 @@
 set -uo pipefail
 
 # Not "VERSION": sourcing /etc/os-release below would overwrite it with the OS version.
-COLLECTOR_VERSION="1.0.1"
+COLLECTOR_VERSION="1.0.2"
 WAZUH_AGENT_VERSION="4.14.7"
 ETC=/etc/pscyber-collector
 LOGDIR=/var/log/pscyber
@@ -292,6 +292,9 @@ case "${1:-status}" in
     systemctl daemon-reload; systemctl restart rsyslog 2>/dev/null; systemctl restart snmptrapd 2>/dev/null
     if command -v apt-get >/dev/null; then apt-get purge -y -qq wazuh-agent >/dev/null; else (dnf -y remove wazuh-agent || yum -y remove wazuh-agent) >/dev/null; fi
     rm -rf /var/ossec /etc/pscyber-collector /opt/pscyber-collector /var/log/pscyber /usr/local/bin/pscyber-collector
+    if command -v ufw >/dev/null; then
+      for r in 514/udp 514/tcp 162/udp 1514/tcp 1515/tcp; do ufw delete allow "$r" >/dev/null 2>&1; done
+    fi
     echo "PSCyber collector removed. Ask the SOC to revoke it in the platform (Collectors page)."
     ;;
   *) echo "usage: pscyber-collector [status|site-agent-command|uninstall]"; exit 2 ;;
