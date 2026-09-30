@@ -22,6 +22,11 @@ def active(unit: str) -> str:
         return "unknown"
 
 
+def _importable(module: str) -> bool:
+    import importlib.util
+    return importlib.util.find_spec(module) is not None
+
+
 def agent_state() -> dict:
     out = {}
     try:
@@ -51,6 +56,8 @@ def main() -> None:
         "syslog_sources": sorted(sources, key=lambda s: -s["bytes"])[:50],
         "syslog_source_count": len(sources),
         "snmptrap_log_bytes": traps,
+        # Which host types the responder can reach from here: SSH needs paramiko, WinRM pywinrm.
+        "responder_libs": {m: _importable(m) for m in ("paramiko", "winrm")},
         "os": platform.platform(),
     }
     if os.path.exists(f"{ETC}/platform.pem"):
