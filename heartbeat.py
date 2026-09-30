@@ -27,6 +27,18 @@ def _importable(module: str) -> bool:
     return importlib.util.find_spec(module) is not None
 
 
+def ansible_version() -> str:
+    """'2.19.4' when ansible-playbook and sshpass are both here, else '' (cannot run playbooks)."""
+    import shutil
+    if not (shutil.which("ansible-playbook") and shutil.which("sshpass")):
+        return ""
+    try:
+        first = subprocess.run(["ansible-playbook", "--version"], capture_output=True, text=True, timeout=20).stdout.splitlines()[0]
+        return first.split("[core")[-1].strip(" ]") if "[core" in first else first.split()[-1]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def agent_state() -> dict:
     out = {}
     try:
@@ -58,6 +70,8 @@ def main() -> None:
         "snmptrap_log_bytes": traps,
         # Which host types the responder can reach from here: SSH needs paramiko, WinRM pywinrm.
         "responder_libs": {m: _importable(m) for m in ("paramiko", "winrm")},
+        # 1.2.0+: this box is the site's Ansible control node (approved playbooks only).
+        "ansible": ansible_version(),
         "os": platform.platform(),
     }
     if os.path.exists(f"{ETC}/platform.pem"):

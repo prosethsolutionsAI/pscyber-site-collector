@@ -86,6 +86,16 @@ Every command is recorded in the SOC's audit log with the analyst who ran it.
 Windows hosts need WinRM enabled (`Enable-PSRemoting`) and TCP 5985 (or 5986 for HTTPS)
 open from the collector.
 
+### Ansible playbooks (version 1.2.0+)
+
+From 1.2.0 the collector is also the site's **Ansible control node**: `update.sh` installs
+`ansible-core` and `sshpass` from the distribution. A playbook runs only after a SOC
+engineer drafted it and a **second** engineer approved that exact text. For the length of
+one run the playbook and an inventory of the chosen hosts (with their logins) are written
+to a temporary directory only root can read, then removed; the logins are masked in the
+output sent back. Linux hosts are reached over SSH (become uses the same login's password),
+Windows hosts over WinRM. Terraform is deliberately **not** installed here.
+
 ## Updating
 
 ```bash
@@ -149,6 +159,6 @@ Then ask Proseth to revoke the collector in the SOC platform.
 | `install.sh` | Installer and setup wizard |
 | `update.sh` | Installs / updates the collector software (heartbeat, responder, commands); used by the installer too |
 | `heartbeat.py` | Health report to the SOC platform (runs every minute); starts an update when the SOC asks |
-| `responder.py` | Checks the site's hosts and runs the SOC's commands on them (SSH / WinRM) |
+| `responder.py` | Checks the site's hosts and runs the SOC's commands and approved playbooks on them (SSH / WinRM / Ansible) |
 | `o365.sh` | Optional: fetch the customer's Microsoft 365 audit logs (asks for the secret, tests first) |
 | `VERSION` | Collector version |

@@ -11,7 +11,8 @@ credential arrives in the claim reply and is never written to disk, and a job th
 fails returns a readable reason rather than a stack trace.
 
 Runs as a long-lived service, polling every few seconds. Standard library, plus
-paramiko for SSH (installed by install.sh).
+paramiko for SSH, pywinrm for WinRM, and (1.2.0+) ansible-core + sshpass so this box
+is the site's Ansible control node for approved playbooks (installed by update.sh).
 """
 import json
 import os
@@ -209,11 +210,168 @@ def _winrm_run(target: dict, script: str, timeout: int = 120) -> dict:
     return {"ok": r.status_code == 0, "exit_code": r.status_code, "output": text, "error": ""}
 
 
+def _sudo_ws(target: dict) -> bool:
+    """Ubuntu 25.10+ makes sudo-rs the default `sudo` and keeps the original as `sudo.ws`.
+    Ansible's become prompt handling times out against sudo-rs with a message that never
+    mentions sudo (seen with the Engineer System worker), so use sudo.ws where it exists."""
+    try:
+        r = _ssh_run(target, "command -v sudo.ws >/dev/null 2>&1 && echo yes || echo no", 20)
+    except Exception:  # noqa: BLE001 - no paramiko (update.sh installs it): plain sudo, not a failed run
+        return False
+    return bool(r.get("ok")) and r.get("output", "").strip().endswith("yes")
+
+
+def _inventory(hosts: list) -> tuple[dict, list]:
+    """An Ansible YAML inventory (written as JSON, which is valid YAML - no quoting to get
+    wrong) with every host in the group `targets`. Returns it and the secrets in it, so they
+    can be masked out of anything printed."""
+    import re
+    secrets, entries, used = [], {}, set()
+    for h in hosts:
+        name = re.sub(r"[^A-Za-z0-9_.-]", "_", h.get("name") or h.get("address") or "host")
+        while name in used:
+            name += "_"
+        used.add(name)
+        pw = h.get("password") or ""
+        if pw:
+            secrets.append(pw)
+        v = {"ansible_host": h.get("address"), "ansible_port": int(h.get("port") or 22),
+             "ansible_user": h.get("username") or "", "ansible_password": pw}
+        if h.get("transport") == "winrm":
+            v.update(ansible_connection="winrm", ansible_winrm_transport="ntlm",
+                     ansible_winrm_scheme="https" if int(h.get("port") or 5985) == 5986 else "http",
+                     ansible_winrm_server_cert_validation="ignore")
+        else:
+            v.update(ansible_connection="ssh", ansible_become_password=pw)
+            if _sudo_ws(h):
+                v["ansible_become_exe"] = "sudo.ws"
+        entries[name] = v
+    return {"all": {"children": {"targets": {"hosts": entries}}}}, secrets
+
+
+def _tree(root: int) -> list:
+    """root and every process descended from it, from /proc (parents first)."""
+    kids: dict = {}
+    for p in os.listdir("/proc"):
+        if p.isdigit():
+            try:
+                ppid = int(open(f"/proc/{p}/stat").read().rsplit(")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            kids.setdefault(ppid, []).append(int(p))
+    out, todo = [], [root]
+    while todo:
+        p = todo.pop(0)
+        out.append(p)
+        todo += kids.get(p, [])
+    return out
+
+
+def _alive(pid: int) -> bool:
+    """Running, i.e. not gone and not a zombie waiting to be reaped."""
+    try:
+        return open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
+def _ansible_run(job: dict, progress=None) -> dict:
+    """Run an approved playbook against the job's hosts, from THIS box as the Ansible
+    control node. Playbook and inventory (which holds the hosts' logins) live in a 0700
+    temporary directory only root can read, for the length of the run, and are removed
+    whatever happens. Output streams to the platform like a command's does."""
+    import shutil
+    import signal
+    import subprocess
+    import tempfile
+    import threading
+    params = job.get("params") or {}
+    playbook = params.get("playbook") or ""
+    hosts = job.get("inventory") or []
+    timeout = int(params.get("timeout") or 900)
+    exe = shutil.which("ansible-playbook")
+    if not exe:
+        return {"status": "failed", "result": {"error": "Ansible is not installed on the collector - run: sudo pscyber-collector update"}, "output": ""}
+    if not playbook.strip() or not hosts:
+        return {"status": "failed", "result": {"error": "no playbook or no hosts in the job"}, "output": ""}
+    if any(h.get("transport") != "winrm" for h in hosts) and not shutil.which("sshpass"):
+        return {"status": "failed", "result": {"error": "sshpass is not installed on the collector (Ansible needs it for password SSH) - run: sudo pscyber-collector update"}, "output": ""}
+    tmp = tempfile.mkdtemp(prefix="pscyber-ansible-")  # 0700
+    try:
+        inv, secrets = _inventory(hosts)
+
+        def private(name: str, text: str) -> str:
+            p = os.path.join(tmp, name)
+            with open(os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
+                f.write(text)
+            return p
+        inv_p = private("inventory.json", json.dumps(inv))
+        pb_p = private("playbook.yml", playbook)
+        cfg_p = private("ansible.cfg", "[defaults]\nretry_files_enabled = False\nnocolor = True\n"
+                                       "interpreter_python = auto_silent\n")
+        env = {"PATH": os.environ.get("PATH", "/usr/sbin:/usr/bin:/sbin:/bin"), "HOME": tmp, "LANG": "C.UTF-8",
+               "ANSIBLE_CONFIG": cfg_p, "ANSIBLE_HOST_KEY_CHECKING": "False",
+               "ANSIBLE_LOCAL_TEMP": os.path.join(tmp, "local"), "ANSIBLE_FORCE_COLOR": "0",
+               "ANSIBLE_SSH_ARGS": "-o ControlMaster=no -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no"}
+        proc = subprocess.Popen([exe, "-i", inv_p, pb_p], cwd=tmp, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+        chunks: list = []
+        reader = threading.Thread(target=lambda: [chunks.append(b) for b in iter(lambda: proc.stdout.read1(8192), b"")], daemon=True)
+        reader.start()
+
+        def text() -> str:
+            t = _txt(b"".join(chunks))
+            for s in secrets:
+                if len(s) >= 3:
+                    t = t.replace(s, "********")  # a playbook that prints a login must not ship it
+            return t[-20000:]
+
+        def stop_all():
+            # The whole TREE, not the process group: sshpass starts ssh in a session of its
+            # own, so killpg left ssh - and the command on the host - running (seen on the UAT
+            # box). Ending ssh (-tt) hangs the remote command up.
+            pids = _tree(proc.pid)
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                for p in pids:
+                    try:
+                        os.kill(p, sig)
+                    except OSError:
+                        pass
+                deadline_kill = monotonic() + 5
+                while monotonic() < deadline_kill and any(os.path.exists(f"/proc/{p}") and _alive(p) for p in pids):
+                    time.sleep(0.2)
+            try:
+                proc.wait(5)
+            except Exception:  # noqa: BLE001
+                pass
+        deadline = monotonic() + timeout
+        next_report = monotonic() + PROGRESS_EVERY
+        while proc.poll() is None:
+            if monotonic() > deadline:
+                stop_all()
+                return {"status": "failed", "result": {"error": f"playbook still running after {timeout}s - stopped"}, "output": text()}
+            if progress and monotonic() >= next_report:
+                next_report = monotonic() + PROGRESS_EVERY
+                if progress(text()):
+                    stop_all()
+                    return {"status": "failed", "result": {"error": "stopped from the SOC platform"}, "output": text()}
+            time.sleep(0.2)
+        reader.join(5)
+        code = proc.returncode
+        # 2 = a host failed, 4 = a host unreachable (ansible-playbook's own exit codes)
+        why = {0: "", 2: "a task failed on at least one host", 4: "at least one host was unreachable"}.get(code, f"exit code {code}")
+        return {"status": "done" if code == 0 else "failed", "result": {"exit_code": code, "error": why}, "output": text()}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def run_job(job: dict, progress=None) -> dict:
     """Dispatch one claimed job to its executor. Returns {status, result, output}.
-    progress(output_so_far) -> True means Stop was pressed (SSH commands only; a WinRM
-    command returns its output at the end)."""
+    progress(output_so_far) -> True means Stop was pressed (SSH commands and playbooks;
+    a WinRM command returns its output at the end)."""
     action = job.get("action")
+    if action == "ansible":
+        return _ansible_run(job, progress)
     target = job.get("target") or {}
     transport = target.get("transport") or "ssh"
     network = job.get("connector") == "network_ssh"

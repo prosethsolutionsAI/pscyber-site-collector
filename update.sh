@@ -82,6 +82,29 @@ if [ ${#need[@]} -gt 0 ]; then
   python3 -c 'import winrm' 2>/dev/null || warn "pywinrm is missing - Windows hosts cannot be reached"
 fi
 
+# ------------------------------------------------------------------ Ansible (1.2.0+)
+# This box is the site's Ansible control node for APPROVED playbooks from the SOC's
+# Script writer. ansible-core from the distribution, plus sshpass (password SSH).
+# Terraform is deliberately NOT installed here: its state would live on this box.
+if ! command -v ansible-playbook >/dev/null || ! command -v sshpass >/dev/null; then
+  say "installing Ansible (ansible-core, sshpass)"
+  if command -v apt-get >/dev/null; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y -qq ansible-core sshpass >/dev/null 2>&1 \
+      || { apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq ansible-core sshpass >/dev/null 2>&1; }
+  else
+    PM=$(command -v dnf || command -v yum)
+    "$PM" -y -q install ansible-core >/dev/null 2>&1
+    "$PM" -y -q install sshpass >/dev/null 2>&1 \
+      || { "$PM" -y -q install epel-release >/dev/null 2>&1 && "$PM" -y -q install sshpass >/dev/null 2>&1; }
+  fi
+fi
+if command -v ansible-playbook >/dev/null && command -v sshpass >/dev/null; then
+  ok "Ansible $(ansible-playbook --version 2>/dev/null | head -n1 | sed 's/.*core //; s/]//')"
+else
+  warn "Ansible or sshpass is missing - approved playbooks cannot run from this collector (scripts still can)"
+fi
+
 # ------------------------------------------------------------------ software
 mkdir -p "$OPT" /var/log/pscyber
 for f in heartbeat.py responder.py VERSION; do
