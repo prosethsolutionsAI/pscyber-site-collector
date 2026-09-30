@@ -57,6 +57,27 @@ NEW=$(tr -d '[:space:]' < "$STAGE/VERSION")
 OLD=$(tr -d '[:space:]' < "$OPT/VERSION" 2>/dev/null || true)
 ok "fetched ${NEW} (this box had ${OLD:-nothing})"
 
+# ------------------------------------------------------------------ package installs
+# Bounded and hands-off. A collector often sits on a box that matters (a Wazuh manager,
+# a site server): a package install must never restart its services - Ubuntu's
+# needrestart does exactly that when nobody is at a prompt - and must never wait for
+# ever on a mirror the box cannot reach (1.2.0's Ansible install sat silently for longer
+# than the platform's 8-minute update window on a firewalled manager).
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1
+NET_OPTS=(-o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=1)
+pkg_install() {  # pkg_install <seconds> <package...> - best effort, never longer than that
+  local limit=$1; shift
+  if command -v apt-get >/dev/null; then
+    timeout "$limit" apt-get install -y -qq -o DPkg::Lock::Timeout=120 "${NET_OPTS[@]}" "$@" >/dev/null 2>&1 && return 0
+    say "  refreshing the package lists first (this box's mirrors may be slow)"
+    timeout "$limit" apt-get update -qq "${NET_OPTS[@]}" >/dev/null 2>&1
+    timeout "$limit" apt-get install -y -qq -o DPkg::Lock::Timeout=120 "${NET_OPTS[@]}" "$@" >/dev/null 2>&1
+  else
+    local pm; pm=$(command -v dnf || command -v yum)
+    timeout "$limit" "$pm" -y -q install "$@" >/dev/null 2>&1
+  fi
+}
+
 # ------------------------------------------------------------------ libraries
 # paramiko reaches Linux hosts and network devices over SSH; pywinrm reaches
 # Windows hosts (and domain controllers) over WinRM.
@@ -66,10 +87,8 @@ python3 -c 'import winrm' 2>/dev/null || need+=(winrm)
 if [ ${#need[@]} -gt 0 ]; then
   say "installing Python libraries: ${need[*]}"
   if command -v apt-get >/dev/null; then
-    export DEBIAN_FRONTEND=noninteractive
     pkgs=(); for n in "${need[@]}"; do pkgs+=("python3-$n"); done
-    apt-get install -y -qq "${pkgs[@]}" >/dev/null 2>&1 \
-      || { apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq "${pkgs[@]}" >/dev/null 2>&1; }
+    pkg_install 300 "${pkgs[@]}"
   else
     PM=$(command -v dnf || command -v yum)
     [[ " ${need[*]} " == *" paramiko "* ]] && "$PM" -y -q install python3-paramiko >/dev/null 2>&1
@@ -80,29 +99,6 @@ if [ ${#need[@]} -gt 0 ]; then
   fi
   python3 -c 'import paramiko' 2>/dev/null || warn "paramiko is missing - SSH hosts (Linux, network devices) cannot be reached"
   python3 -c 'import winrm' 2>/dev/null || warn "pywinrm is missing - Windows hosts cannot be reached"
-fi
-
-# ------------------------------------------------------------------ Ansible (1.2.0+)
-# This box is the site's Ansible control node for APPROVED playbooks from the SOC's
-# Script writer. ansible-core from the distribution, plus sshpass (password SSH).
-# Terraform is deliberately NOT installed here: its state would live on this box.
-if ! command -v ansible-playbook >/dev/null || ! command -v sshpass >/dev/null; then
-  say "installing Ansible (ansible-core, sshpass)"
-  if command -v apt-get >/dev/null; then
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get install -y -qq ansible-core sshpass >/dev/null 2>&1 \
-      || { apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq ansible-core sshpass >/dev/null 2>&1; }
-  else
-    PM=$(command -v dnf || command -v yum)
-    "$PM" -y -q install ansible-core >/dev/null 2>&1
-    "$PM" -y -q install sshpass >/dev/null 2>&1 \
-      || { "$PM" -y -q install epel-release >/dev/null 2>&1 && "$PM" -y -q install sshpass >/dev/null 2>&1; }
-  fi
-fi
-if command -v ansible-playbook >/dev/null && command -v sshpass >/dev/null; then
-  ok "Ansible $(ansible-playbook --version 2>/dev/null | head -n1 | sed 's/.*core //; s/]//')"
-else
-  warn "Ansible or sshpass is missing - approved playbooks cannot run from this collector (scripts still can)"
 fi
 
 # ------------------------------------------------------------------ software
@@ -210,3 +206,25 @@ systemctl restart pscyber-responder || warn "responder did not start (journalctl
 # Report the new version straight away, so the platform stops showing the update as pending.
 python3 "$OPT/heartbeat.py" >/dev/null 2>&1 || warn "heartbeat failed - the platform will show the new version at the next successful one"
 ok "PSCyber Site Collector is now $NEW"
+
+# ------------------------------------------------------------------ Ansible (1.2.0+), LAST
+# This box is the site's Ansible control node for APPROVED playbooks from the SOC's Script
+# writer: ansible-core from the distribution, plus sshpass (password SSH). Last and optional
+# on purpose: the collector above is already updated and reporting, so a slow or failed
+# install costs only playbook runs (the platform refuses them, saying why) - never the update.
+# Terraform is deliberately NOT installed here: its state would live on this box.
+if ! command -v ansible-playbook >/dev/null || ! command -v sshpass >/dev/null; then
+  say "installing Ansible (ansible-core, sshpass) - can take a few minutes, at most 10 each step"
+  if command -v apt-get >/dev/null; then
+    pkg_install 600 ansible-core sshpass
+  else
+    pkg_install 600 ansible-core
+    pkg_install 300 sshpass || { pkg_install 300 epel-release && pkg_install 300 sshpass; }
+  fi
+  python3 "$OPT/heartbeat.py" >/dev/null 2>&1  # tell the platform playbooks can run now
+fi
+if command -v ansible-playbook >/dev/null && command -v sshpass >/dev/null; then
+  ok "Ansible $(ansible-playbook --version 2>/dev/null | head -n1 | sed 's/.*core //; s/]//')"
+else
+  warn "Ansible or sshpass could not be installed (no package mirror reachable?) - approved playbooks cannot run from this collector; scripts still can. Re-run: sudo pscyber-collector update"
+fi
