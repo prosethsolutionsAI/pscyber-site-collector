@@ -72,6 +72,36 @@ pscyber-collector site-agent-command   # the command to put Windows/Linux agents
 - **Site Wazuh agents**: install them with `WAZUH_MANAGER=<collector IP>` (the command
   above prints the exact line) - they reach the SOC through the collector.
 
+## Reaching the site's servers (responder)
+
+The collector also runs a **responder**: the SOC adds the site's hosts in the platform
+(*SOAR → Hosts* - Linux over SSH, Windows and Active Directory domain controllers over
+WinRM, network devices over SSH), and the responder checks them and runs the commands
+the SOC sends, **from inside your network**. It works the same way as the heartbeat:
+the collector asks the platform for work over its outbound, pinned HTTPS connection -
+nothing connects in. Host logins are stored encrypted in the platform and reach the
+collector only for the job that needs them; they are never written to this box.
+Every command is recorded in the SOC's audit log with the analyst who ran it.
+
+Windows hosts need WinRM enabled (`Enable-PSRemoting`) and TCP 5985 (or 5986 for HTTPS)
+open from the collector.
+
+## Updating
+
+```bash
+sudo pscyber-collector update          # or the Update button in the SOC platform
+```
+
+The update fetches the new collector software from the SOC platform this box is enrolled
+with, **pinned to the certificate saved at install**, and restarts only the heartbeat and
+the responder. The enrolment, tunnel and Wazuh agent are left exactly as they are, so log
+forwarding is not interrupted. A collector installed before version 1.1.1 does not have
+the update command yet - run this once on it (it keeps the enrolment):
+
+```bash
+curl -sk https://<soc-platform>/collector/update.sh -o update.sh && sudo bash update.sh
+```
+
 ## Security
 
 - **Mutual TLS**: the collector proves who it is with a certificate the SOC signed for
@@ -117,6 +147,8 @@ Then ask Proseth to revoke the collector in the SOC platform.
 | File | Purpose |
 |---|---|
 | `install.sh` | Installer and setup wizard |
-| `heartbeat.py` | Health report to the SOC platform (runs every minute) |
+| `update.sh` | Installs / updates the collector software (heartbeat, responder, commands); used by the installer too |
+| `heartbeat.py` | Health report to the SOC platform (runs every minute); starts an update when the SOC asks |
+| `responder.py` | Checks the site's hosts and runs the SOC's commands on them (SSH / WinRM) |
 | `o365.sh` | Optional: fetch the customer's Microsoft 365 audit logs (asks for the secret, tests first) |
 | `VERSION` | Collector version |

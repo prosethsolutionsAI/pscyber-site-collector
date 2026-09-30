@@ -15,8 +15,6 @@
 # token to move the collector to a new box). `pscyber-collector uninstall` removes it.
 set -uo pipefail
 
-# Not "VERSION": sourcing /etc/os-release below would overwrite it with the OS version.
-COLLECTOR_VERSION="1.0.5"
 WAZUH_AGENT_VERSION="4.14.7"
 ETC=/etc/pscyber-collector
 LOGDIR=/var/log/pscyber
@@ -36,7 +34,7 @@ CA_FP_EXPECTED="${PSCYBER_CA_FINGERPRINT:-}"
 INTERACTIVE=1; [ -n "$PLATFORM" ] && [ -n "$TOKEN" ] && INTERACTIVE=0
 
 echo
-echo "  PSCyber Site Collector $COLLECTOR_VERSION"
+echo "  PSCyber Site Collector"
 echo "  Forwards this site's syslog, SNMP traps and Wazuh agents to the Proseth SOC."
 echo
 [ -n "$PLATFORM" ] || read -r -p "  Platform URL (given by Proseth, e.g. https://soc.example.com:8443): " PLATFORM
@@ -244,64 +242,6 @@ PY
 /var/ossec/bin/manage_agents -i "$(cat "$ETC/agent.key")" <<<'y' >/dev/null || die "could not import the agent key"
 ok "agent key imported ($AGENT_NAME)"
 
-# ------------------------------------------------------------------ heartbeat + CLI
-say "installing the heartbeat and the pscyber-collector command"
-mkdir -p /opt/pscyber-collector
-curl -sfk "$PLATFORM/collector/files/heartbeat.py" -o /opt/pscyber-collector/heartbeat.py || die "cannot fetch heartbeat.py"
-echo "$COLLECTOR_VERSION" > /opt/pscyber-collector/VERSION
-cat > /etc/systemd/system/pscyber-heartbeat.service <<'EOF'
-[Unit]
-Description=PSCyber collector heartbeat to the SOC platform
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/python3 /opt/pscyber-collector/heartbeat.py
-EOF
-cat > /etc/systemd/system/pscyber-heartbeat.timer <<'EOF'
-[Unit]
-Description=PSCyber collector heartbeat every minute
-[Timer]
-OnBootSec=30
-OnUnitActiveSec=60
-[Install]
-WantedBy=timers.target
-EOF
-cat > /usr/local/bin/pscyber-collector <<'EOF'
-#!/usr/bin/env bash
-# PSCyber collector: status | site-agent-command | uninstall
-case "${1:-status}" in
-  status)
-    for s in pscyber-tunnel wazuh-agent rsyslog snmptrapd pscyber-heartbeat.timer; do
-      printf '%-24s %s\n' "$s" "$(systemctl is-active "$s")"; done
-    grep -h "^status=" /var/ossec/var/run/wazuh-agentd.state 2>/dev/null | sed 's/^/wazuh agent /'
-    echo "syslog sources: $(ls /var/log/pscyber/syslog 2>/dev/null | wc -l)"
-    ;;
-  site-agent-command)
-    ip=$(hostname -I | awk '{print $1}')
-    pw=$(python3 -c "import json;print(json.load(open('/etc/pscyber-collector/config.json')).get('site_agent_enroll_password',''))")
-    grp=$(python3 -c "import json;print(json.load(open('/etc/pscyber-collector/config.json'))['group'])")
-    extra=""; [ -n "$pw" ] && extra=" WAZUH_REGISTRATION_PASSWORD='$pw'"
-    echo "Linux (deb):  sudo WAZUH_MANAGER='$ip'$extra WAZUH_AGENT_GROUP='$grp' dpkg -i ./wazuh-agent_4.14.7-1_amd64.deb"
-    echo "Windows:      msiexec.exe /i wazuh-agent-4.14.7-1.msi /q WAZUH_MANAGER='$ip'$extra WAZUH_AGENT_GROUP='$grp'"
-    [ -z "$pw" ] && echo "(no enrolment password was provided by the platform - agents will be refused until ENROLL_PASSWORD is set there)"
-    ;;
-  uninstall)
-    systemctl disable --now pscyber-tunnel pscyber-heartbeat.timer 2>/dev/null
-    systemctl stop wazuh-agent 2>/dev/null
-    rm -f /etc/systemd/system/pscyber-tunnel.service /etc/systemd/system/pscyber-heartbeat.{service,timer}
-    rm -rf /etc/systemd/system/snmptrapd.service.d/pscyber.conf /etc/rsyslog.d/30-pscyber-collector.conf
-    systemctl daemon-reload; systemctl restart rsyslog 2>/dev/null; systemctl restart snmptrapd 2>/dev/null
-    if command -v apt-get >/dev/null; then apt-get purge -y -qq wazuh-agent >/dev/null; else (dnf -y remove wazuh-agent || yum -y remove wazuh-agent) >/dev/null; fi
-    rm -rf /var/ossec /etc/pscyber-collector /opt/pscyber-collector /var/log/pscyber /usr/local/bin/pscyber-collector
-    if command -v ufw >/dev/null; then
-      for r in 514/udp 514/tcp 162/udp 1514/tcp 1515/tcp; do ufw delete allow "$r" >/dev/null 2>&1; done
-    fi
-    echo "PSCyber collector removed. Ask the SOC to revoke it in the platform (Collectors page)."
-    ;;
-  *) echo "usage: pscyber-collector [status|site-agent-command|uninstall]"; exit 2 ;;
-esac
-EOF
-chmod 755 /usr/local/bin/pscyber-collector
-
 # ------------------------------------------------------------------ start
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   say "opening the collector ports in ufw (site devices -> this box)"
@@ -312,10 +252,14 @@ systemctl enable --now pscyber-tunnel >/dev/null 2>&1 || die "tunnel failed to s
 systemctl restart rsyslog || die "rsyslog failed (journalctl -u rsyslog)"
 systemctl enable snmptrapd >/dev/null 2>&1; systemctl restart snmptrapd || warn "snmptrapd did not start"
 systemctl enable wazuh-agent >/dev/null 2>&1; systemctl restart wazuh-agent || die "wazuh-agent failed to start"
-systemctl enable --now pscyber-heartbeat.timer >/dev/null 2>&1
+# ------------------------------------------------------------------ software (heartbeat, responder, CLI)
+# The same update.sh the Update button runs later, so install and update cannot drift apart.
 sleep 15
-python3 /opt/pscyber-collector/heartbeat.py >/dev/null 2>&1 || warn "first heartbeat failed - the platform will show it offline until one succeeds"
-
+say "installing the collector software"
+curl -sfk "$PLATFORM/collector/update.sh" -o /tmp/pscyber-update.sh || die "cannot fetch update.sh"
+PSCYBER_PLATFORM="$PLATFORM" bash /tmp/pscyber-update.sh || die "the software install failed (see above)"
+rm -f /tmp/pscyber-update.sh
+COLLECTOR_VERSION=$(cat /opt/pscyber-collector/VERSION)
 echo
 ok "PSCyber Site Collector $COLLECTOR_VERSION installed for '$TENANT'"
 echo "     Point switches/firewalls syslog at:   $(hostname -I | awk '{print $1}') UDP/TCP 514"

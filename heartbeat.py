@@ -46,7 +46,7 @@ def main() -> None:
         pass
     traps = os.path.getsize("/var/log/pscyber/snmptraps.log") if os.path.exists("/var/log/pscyber/snmptraps.log") else 0
     facts = {
-        "services": {u: active(u) for u in ("pscyber-tunnel", "wazuh-agent", "rsyslog", "snmptrapd")},
+        "services": {u: active(u) for u in ("pscyber-tunnel", "wazuh-agent", "rsyslog", "snmptrapd", "pscyber-responder")},
         "wazuh_agent": agent_state(),
         "syslog_sources": sorted(sources, key=lambda s: -s["bytes"])[:50],
         "syslog_source_count": len(sources),
@@ -76,6 +76,18 @@ def main() -> None:
         with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
             json.dump(cfg, f, indent=1)
         os.replace(tmp, f"{ETC}/config.json")
+    if reply.get("update"):
+        start_update()
+
+
+def start_update() -> None:
+    """The platform's Update button. Hand the work to its OWN transient unit and return:
+    update.sh restarts this timer and the responder, and anything inside their cgroups
+    would be killed half way through replacing the software. A fixed unit name makes a
+    second request while one is running fail instead of racing it. Success is proven by
+    the next heartbeat reporting the new version, not by this call."""
+    subprocess.run(["systemd-run", "--unit=pscyber-collector-update", "--collect", "--no-block",
+                    "/usr/local/sbin/pscyber-collector-update"], capture_output=True, timeout=15)
 
 
 if __name__ == "__main__":
