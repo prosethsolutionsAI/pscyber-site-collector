@@ -58,7 +58,14 @@ FACTS = ("echo hostname=$(hostname 2>/dev/null); echo kernel=$(uname -r 2>/dev/n
          "echo memory_mb=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null)")
 
 
-def _ssh_run(target: dict, script: str | None, timeout: int = 120) -> dict:
+PROGRESS_EVERY = 2  # seconds between live-output posts while a command runs
+
+
+def _txt(out: bytes) -> str:
+    return out.decode("utf-8", "replace").replace("\r\n", "\n")  # a pty ends lines with CRLF
+
+
+def _ssh_run(target: dict, script: str | None, timeout: int = 120, progress=None) -> dict:
     """Run a command on the host over SSH and return its output. Nothing is written to
     the host; the password goes to paramiko, never to a log. script=None only proves the
     login (network devices: their CLI is not a shell, so FACTS means nothing there)."""
@@ -83,6 +90,11 @@ def _ssh_run(target: dict, script: str | None, timeout: int = 120) -> dict:
         chan = client.get_transport().open_session()
         chan.settimeout(timeout)
         chan.set_combine_stderr(True)
+        if progress:
+            # A terminal for a Run command, so Stop / the time limit really END it: closing a
+            # pty hangs the command up (SIGHUP). Without one, a command that prints nothing
+            # (sleep 600) carries on on the host after the session is gone.
+            chan.get_pty(term="dumb", width=200, height=50)
         # Run the script as the command itself (sshd runs it via the login shell's -c),
         # not piped into `bash -s` over stdin: the stdin-EOF handshake did not make the
         # remote shell exit against the UAT host, so recv never saw the channel close.
@@ -91,19 +103,27 @@ def _ssh_run(target: dict, script: str | None, timeout: int = 120) -> dict:
         # notice the channel finishing and can spin past its own timeout (seen live against
         # the UAT host). recv_ready()/exit_status_ready() + a wall clock is the proven shape.
         deadline = monotonic() + timeout
+        next_report = monotonic() + PROGRESS_EVERY
         out = b""
         while True:
             if monotonic() > deadline:
-                chan.close()
-                return {"ok": False, "output": out.decode("utf-8", "replace")[:20000],
-                        "error": f"no output and no exit after {timeout}s on {address} - abandoned"}
+                chan.close()  # closing the session ends the command on the host
+                return {"ok": False, "output": _txt(out)[-20000:],
+                        "error": f"still running after {timeout}s on {address} - stopped "
+                                 f"(a command that never ends by itself, like ping without -c, runs until this limit)"}
+            if progress and monotonic() >= next_report:
+                next_report = monotonic() + PROGRESS_EVERY
+                if progress(_txt(out)):  # the platform says Stop
+                    chan.close()
+                    return {"ok": False, "output": _txt(out)[-20000:],
+                            "error": "stopped from the SOC platform"}
             if chan.recv_ready():
                 chunk = chan.recv(8192)
                 if not chunk:
                     break
                 out += chunk
                 if len(out) > 1_000_000:
-                    break
+                    out = out[-200_000:]  # keep the tail; a chatty command must not eat the box's memory
             elif chan.exit_status_ready():
                 break
             else:
@@ -111,7 +131,8 @@ def _ssh_run(target: dict, script: str | None, timeout: int = 120) -> dict:
         while chan.recv_ready():
             out += chan.recv(8192)
         code = chan.recv_exit_status()
-        return {"ok": code == 0, "exit_code": code, "output": out.decode("utf-8", "replace")[:20000], "error": ""}
+        text = _txt(out)
+        return {"ok": code == 0, "exit_code": code, "output": text[-20000:], "error": ""}
     finally:
         client.close()
 
@@ -188,8 +209,10 @@ def _winrm_run(target: dict, script: str, timeout: int = 120) -> dict:
     return {"ok": r.status_code == 0, "exit_code": r.status_code, "output": text, "error": ""}
 
 
-def run_job(job: dict) -> dict:
-    """Dispatch one claimed job to its executor. Returns {status, result, output}."""
+def run_job(job: dict, progress=None) -> dict:
+    """Dispatch one claimed job to its executor. Returns {status, result, output}.
+    progress(output_so_far) -> True means Stop was pressed (SSH commands only; a WinRM
+    command returns its output at the end)."""
     action = job.get("action")
     target = job.get("target") or {}
     transport = target.get("transport") or "ssh"
@@ -208,7 +231,8 @@ def run_job(job: dict) -> dict:
         script = (job.get("params") or {}).get("script") or ""
         if not script.strip():
             return {"status": "failed", "result": {"error": "no command supplied"}, "output": ""}
-        r = execute(target, script, timeout=int((job.get("params") or {}).get("timeout") or 300))
+        timeout = int((job.get("params") or {}).get("timeout") or 300)
+        r = _ssh_run(target, script, timeout, progress) if transport == "ssh" else _winrm_run(target, script, timeout)
         # Many network CLIs report no exit status (-1) for a command that worked: there,
         # only a transport error is a failure.
         ok = r["ok"] or (network and not r.get("error"))
@@ -217,23 +241,52 @@ def run_job(job: dict) -> dict:
     return {"status": "failed", "result": {"error": f"unknown action '{action}'"}, "output": ""}
 
 
+MAX_PARALLEL = 4  # jobs at once: a long command must not hold a Check up behind it
+
+
+def _work(job: dict, cfg: dict, ctx: ssl.SSLContext) -> None:
+    def progress(output: str) -> bool:
+        try:
+            return bool(_post(f"/api/collectors/jobs/{job['id']}/progress", {"output": output[-20000:]}, cfg, ctx).get("cancel"))
+        except Exception:  # noqa: BLE001 - an older platform, or a blip: keep running
+            return False
+    try:
+        res = run_job(job, progress)
+    except Exception as e:  # noqa: BLE001 - one bad job must not kill the responder
+        res = {"status": "failed", "result": {"error": f"{type(e).__name__}: {e}"}, "output": ""}
+    for _ in range(3):  # the result is the only record of what happened - retry a blip
+        try:
+            _post(f"/api/collectors/jobs/{job['id']}/result", res, cfg, ctx)
+            return
+        except Exception:  # noqa: BLE001
+            time.sleep(3)
+
+
 def main() -> None:
+    import threading
     ctx = _ctx()
+    busy: set = set()
+    lock = threading.Lock()
+
+    def run(job, cfg):
+        try:
+            _work(job, cfg, ctx)
+        finally:
+            with lock:
+                busy.discard(job["id"])
+
     while True:
         delay = POLL_IDLE
         try:
             cfg = _cfg()
-            jobs = _post("/api/collectors/jobs/claim", {}, cfg, ctx).get("jobs") or []
-            for job in jobs:
-                delay = POLL_BUSY
-                try:
-                    res = run_job(job)
-                except Exception as e:  # noqa: BLE001 - one bad job must not kill the loop
-                    res = {"status": "failed", "result": {"error": f"{type(e).__name__}: {e}"}, "output": ""}
-                try:
-                    _post(f"/api/collectors/jobs/{job['id']}/result", res, cfg, ctx)
-                except Exception:  # noqa: BLE001 - the platform expires an unresulted job; try again next loop
-                    pass
+            with lock:
+                free = MAX_PARALLEL - len(busy)
+            if free > 0:
+                for job in _post("/api/collectors/jobs/claim", {"max": free}, cfg, ctx).get("jobs") or []:
+                    delay = POLL_BUSY
+                    with lock:
+                        busy.add(job["id"])
+                    threading.Thread(target=run, args=(job, cfg), daemon=True).start()
         except urllib.error.URLError:
             delay = POLL_IDLE  # platform unreachable; keep trying quietly
         except Exception:  # noqa: BLE001
