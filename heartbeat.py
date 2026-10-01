@@ -3,13 +3,15 @@
 healthy. Runs every minute (systemd timer). Standard library only.
 
 Sends nothing from the logs themselves - only service states, the Wazuh agent's
-connection state, how many devices are sending syslog, and file sizes.
+connection state, how many devices are sending syslog, file sizes, and (1.2.2+) the
+box's own CPU, load, memory and disk use.
 """
 import json
 import os
 import platform
 import ssl
 import subprocess
+import time
 import urllib.request
 
 ETC = "/etc/pscyber-collector"
@@ -51,6 +53,52 @@ def agent_state() -> dict:
     return {k: out.get(k) for k in ("status", "last_keepalive", "last_ack", "msg_count", "msg_sent")}
 
 
+REAL_FS = {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "vfat", "ntfs", "f2fs", "jfs", "reiserfs"}
+
+
+def system(proc: str = "/proc", mounts: str = "/proc/mounts") -> dict:
+    """The box's own CPU, load, memory and disk use - numbers only. The platform shows them on
+    the Site collectors page and warns before a disk fills (1.2.2+)."""
+    out: dict = {}
+    try:
+        def stat():
+            v = [int(x) for x in open(f"{proc}/stat").readline().split()[1:9]]
+            return sum(v), v[3] + v[4]
+        t1, i1 = stat()
+        time.sleep(1)
+        t2, i2 = stat()
+        if t2 > t1:
+            out["cpu_pct"] = round(100.0 * ((t2 - t1) - (i2 - i1)) / (t2 - t1), 1)
+        out["load"] = [float(x) for x in open(f"{proc}/loadavg").read().split()[:3]]
+        out["cores"] = os.cpu_count()
+        mem = {line.split(":")[0]: int(line.split()[1]) for line in open(f"{proc}/meminfo") if len(line.split()) > 1}
+        out["mem_total_kb"], out["mem_avail_kb"] = mem.get("MemTotal"), mem.get("MemAvailable")
+        out["uptime_s"] = int(float(open(f"{proc}/uptime").read().split()[0]))
+    except (OSError, ValueError, IndexError):
+        pass
+    disks, seen = [], set()
+    try:
+        for line in open(mounts):
+            dev, mnt, fstype = line.split()[:3]
+            if fstype not in REAL_FS or dev in seen:
+                continue
+            seen.add(dev)  # one line per device: bind mounts repeat it
+            mnt = mnt.replace("\\040", " ")
+            try:
+                st = os.statvfs(mnt)
+            except (OSError, AttributeError):
+                continue
+            size = st.f_blocks * st.f_frsize // 1024
+            used = (st.f_blocks - st.f_bfree) * st.f_frsize // 1024
+            if size:
+                disks.append({"mount": mnt, "size_kb": size, "used_kb": used,
+                              "pct": round(100.0 * used / (used + st.f_bavail * st.f_frsize // 1024 or 1), 1)})
+    except OSError:
+        pass
+    out["disks"] = disks[:15]
+    return out
+
+
 def main() -> None:
     cfg = json.load(open(f"{ETC}/config.json"))
     platform_url = cfg.get("platform_url") or open(f"{ETC}/platform_url").read().strip()
@@ -73,6 +121,7 @@ def main() -> None:
         # 1.2.0+: this box is the site's Ansible control node (approved playbooks only).
         "ansible": ansible_version(),
         "os": platform.platform(),
+        "system": system(),
     }
     if os.path.exists(f"{ETC}/platform.pem"):
         # Pinned: only the exact certificate saved at install is trusted. The name

@@ -71,6 +71,9 @@ pscyber-collector site-agent-command   # the command to put Windows/Linux agents
   you gave the wizard (default `public` - change it on the devices and re-run the installer).
 - **Site Wazuh agents**: install them with `WAZUH_MANAGER=<collector IP>` (the command
   above prints the exact line) - they reach the SOC through the collector.
+- **The box itself** (1.2.2+): the heartbeat also reports its CPU, load, memory and disk
+  use - numbers only - so the SOC sees a full disk or memory shortage before it stops the
+  collector.
 
 ## Reaching the site's servers (responder)
 
