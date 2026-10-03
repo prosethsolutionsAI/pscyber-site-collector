@@ -401,6 +401,44 @@ def run_job(job: dict, progress=None) -> dict:
 
 MAX_PARALLEL = 4  # jobs at once: a long command must not hold a Check up behind it
 
+# 1.2.3+: cloud feeds (FortiEDR). The platform pulls the customer's events (the MSSP login never
+# leaves it); this box fetches its OWN customer's lines and appends them to a file its Wazuh agent
+# reads as JSON - so they reach Wazuh labelled as this customer, like the site's syslog.
+FEED_DIR = "/var/log/pscyber/feeds"
+FEED_EVERY = 30                 # seconds between fetches
+FEED_ROTATE = 50 * 1024 * 1024  # bytes: fortiedr.json -> fortiedr.json.1 (the agent reads *.json only)
+
+
+def _write_feed(feed: str, lines: list) -> None:
+    os.makedirs(FEED_DIR, mode=0o750, exist_ok=True)
+    path = f"{FEED_DIR}/{feed}.json"
+    if os.path.exists(path) and os.path.getsize(path) > FEED_ROTATE:
+        os.replace(path, path + ".1")
+    with open(path, "a", encoding="utf-8") as f:
+        for line in lines:
+            f.write(line.replace("\n", " ") + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def feeds_once(cfg: dict, ctx: ssl.SSLContext) -> int:
+    """Fetch, write, acknowledge - acknowledged only once on disk, so a crash re-sends, never loses."""
+    try:
+        got = _post("/api/collectors/feed/claim", {"max": 1000}, cfg, ctx).get("events") or []
+    except urllib.error.HTTPError as e:
+        if e.code == 404:  # an older platform: no feeds there
+            return 0
+        raise
+    if not got:
+        return 0
+    by_feed: dict = {}
+    for ev in got:
+        by_feed.setdefault(ev.get("feed") or "fortiedr", []).append(ev["line"])
+    for feed, lines in by_feed.items():
+        _write_feed("".join(ch for ch in feed if ch.isalnum() or ch in "-_") or "feed", lines)
+    _post("/api/collectors/feed/ack", {"ids": [ev["id"] for ev in got]}, cfg, ctx)
+    return len(got)
+
 
 def _work(job: dict, cfg: dict, ctx: ssl.SSLContext) -> None:
     def progress(output: str) -> bool:
@@ -433,10 +471,18 @@ def main() -> None:
             with lock:
                 busy.discard(job["id"])
 
+    last_feed = 0.0
     while True:
         delay = POLL_IDLE
         try:
             cfg = _cfg()
+            if monotonic() - last_feed >= FEED_EVERY:
+                last_feed = monotonic()
+                try:
+                    if feeds_once(cfg, ctx) >= 1000:
+                        last_feed = 0.0  # a full batch: there is more waiting - fetch again straight away
+                except Exception:  # noqa: BLE001 - feeds must never stop the jobs
+                    pass
             with lock:
                 free = MAX_PARALLEL - len(busy)
             if free > 0:

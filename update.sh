@@ -3,8 +3,9 @@
 #
 # Refreshes the collector's own software from the platform it is enrolled with:
 # the heartbeat, the responder (site worker), the pscyber-collector command and
-# the self-update helper. It never touches the enrolment, the certificates, the
-# tunnel or the Wazuh agent, so it is safe to run at any time, as often as you like.
+# the self-update helper. It never touches the enrolment, the certificates or the
+# tunnel; the Wazuh agent only ONCE (1.2.3: reading the cloud-feed files), so it is
+# safe to run at any time, as often as you like.
 #
 # A collector older than 1.1.1 has to be updated by hand ONCE:
 #   curl -sk https://<platform>/collector/update.sh -o update.sh && sudo bash update.sh
@@ -99,6 +100,35 @@ if [ ${#need[@]} -gt 0 ]; then
   fi
   python3 -c 'import paramiko' 2>/dev/null || warn "paramiko is missing - SSH hosts (Linux, network devices) cannot be reached"
   python3 -c 'import winrm' 2>/dev/null || warn "pywinrm is missing - Windows hosts cannot be reached"
+fi
+
+# ------------------------------------------------------------------ cloud feeds (1.2.3+)
+# FortiEDR events arrive from the platform (the responder writes them); the Wazuh agent reads them
+# as JSON, labelled as this customer. Added ONCE - the only time an update touches the agent - and
+# the agent is restarted only then, after its configuration is checked.
+mkdir -p /var/log/pscyber/feeds && chmod 750 /var/log/pscyber/feeds
+OSSEC_CONF=/var/ossec/etc/ossec.conf
+if [ -f "$OSSEC_CONF" ] && ! grep -q 'PSCYBER-FEEDS' "$OSSEC_CONF"; then
+  say "letting the Wazuh agent read the cloud feeds (FortiEDR) - /var/log/pscyber/feeds/*.json"
+  cp -p "$OSSEC_CONF" "$OSSEC_CONF.pscyber-feeds.bak"
+  cat >> "$OSSEC_CONF" <<'EOF'
+
+<!-- PSCYBER-FEEDS - cloud-feed events from the SOC platform (FortiEDR), one JSON object per line -->
+<ossec_config>
+  <localfile>
+    <log_format>json</log_format>
+    <location>/var/log/pscyber/feeds/*.json</location>
+  </localfile>
+</ossec_config>
+<!-- /PSCYBER-FEEDS -->
+EOF
+  if systemctl restart wazuh-agent && sleep 5 && systemctl is-active --quiet wazuh-agent; then
+    ok "Wazuh agent reads the cloud feeds"
+  else
+    warn "the Wazuh agent did not start with the feeds - putting its previous configuration back"
+    cp -p "$OSSEC_CONF.pscyber-feeds.bak" "$OSSEC_CONF"
+    systemctl restart wazuh-agent
+  fi
 fi
 
 # ------------------------------------------------------------------ software

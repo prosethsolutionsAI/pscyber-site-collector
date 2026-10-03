@@ -1,7 +1,7 @@
 # PSCyber Site Collector
 
 One Linux box at a customer site that collects the site's security logs and
-sends them to the **Proseth SOC** (Wazuh + Proseth SOC Agentic AI):
+sends them to the **PSCyber SOC** (Wazuh + PSCyber SOC Agentic AI):
 
 | From the site | Sent to | Port on the collector |
 |---|---|---|
@@ -14,7 +14,7 @@ tunnel**. Nothing inbound has to be opened on the customer's firewall.
 
 ```
  switches / firewalls ──syslog 514──┐
- devices ─────────SNMP traps 162────┤                          ┌──────────── Proseth SOC ────────────┐
+ devices ─────────SNMP traps 162────┤                          ┌──────────── PSCyber SOC ────────────┐
  Windows / Linux agents ─1514/1515──┤  PSCyber Site Collector  │                                     │
                                     └─►  rsyslog · snmptrapd ──┼─► gateway ─► Wazuh ─► Agentic AI    │
                                          Wazuh agent · stunnel │   (mTLS)                           │
@@ -27,12 +27,12 @@ tunnel**. Nothing inbound has to be opened on the customer's firewall.
 - A Linux VM or small server: **Ubuntu 22.04+ / Debian 12+** or **RHEL / Rocky / Alma 8+**,
   2 vCPU, 2 GB RAM, 20 GB disk is plenty for most sites.
 - Outbound from the collector: **HTTPS to the SOC platform**, and **TCP 51514 and 51515
-  to the SOC gateway** (Proseth gives you both addresses).
-- An **install command** from Proseth (it contains a one-time token, valid 24 hours).
+  to the SOC gateway** (PSCyber gives you both addresses).
+- An **install command** from PSCyber (it contains a one-time token, valid 24 hours).
 
 ## Install
 
-Proseth creates the collector in the SOC platform (*Site collectors → New collector*)
+PSCyber creates the collector in the SOC platform (*Site collectors → New collector*)
 and sends you a command like:
 
 ```bash
@@ -52,7 +52,7 @@ The installer:
 
 1. installs `rsyslog`, `snmptrapd`, `stunnel` and the **Wazuh agent 4.14.7**;
 2. **pins the SOC's CA** - it shows the SHA-256 fingerprint and stops if it does not
-   match the one Proseth gave you (`PSCYBER_CA_FINGERPRINT`);
+   match the one PSCyber gave you (`PSCYBER_CA_FINGERPRINT`);
 3. creates this box's **own private key** (it never leaves the box) and enrols with the
    token: the SOC signs its certificate and registers it for **your company only**;
 4. starts the TLS tunnel, syslog on 514, SNMP traps on 162, and a heartbeat so the SOC
@@ -132,7 +132,7 @@ curl -sk https://<soc-platform>/collector/update.sh -o update.sh && sudo bash up
 Microsoft 365 cannot send logs. With `o365.sh`, the Wazuh agent on this collector
 **fetches** the customer's Office 365 audit logs from Microsoft every minute
 (outbound HTTPS 443 to `login.microsoftonline.com` and `manage.office.com`) and sends
-them through the same tunnel. Proseth gives you the exact command with your IDs:
+them through the same tunnel. PSCyber gives you the exact command with your IDs:
 
 ```bash
 curl -sO https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-collector/main/o365.sh
@@ -153,7 +153,7 @@ onboarding guide, `microsoft365.md`.
 sudo pscyber-collector uninstall
 ```
 
-Then ask Proseth to revoke the collector in the SOC platform.
+Then ask PSCyber to revoke the collector in the SOC platform.
 
 ## Files
 

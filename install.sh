@@ -3,7 +3,7 @@
 #
 # One Linux box at the customer site. Switches/firewalls send syslog to it,
 # devices send SNMP traps to it, and the site's Windows/Linux Wazuh agents point
-# at it. It forwards everything to the Proseth SOC through a MUTUAL-TLS tunnel
+# at it. It forwards everything to the PSCyber SOC through a MUTUAL-TLS tunnel
 # (it proves who it is with its own certificate; it checks the SOC's certificate
 # against a pinned CA). Nothing inbound is needed at the customer's firewall -
 # only outbound TCP to the SOC gateway.
@@ -35,9 +35,9 @@ INTERACTIVE=1; [ -n "$PLATFORM" ] && [ -n "$TOKEN" ] && INTERACTIVE=0
 
 echo
 echo "  PSCyber Site Collector"
-echo "  Forwards this site's syslog, SNMP traps and Wazuh agents to the Proseth SOC."
+echo "  Forwards this site's syslog, SNMP traps and Wazuh agents to the PSCyber SOC."
 echo
-[ -n "$PLATFORM" ] || read -r -p "  Platform URL (given by Proseth, e.g. https://soc.example.com:8443): " PLATFORM
+[ -n "$PLATFORM" ] || read -r -p "  Platform URL (given by PSCyber, e.g. https://soc.example.com:8443): " PLATFORM
 [ -n "$TOKEN" ]    || read -r -p "  Install token (from the platform, Collectors page): " TOKEN
 if [ -z "$COMMUNITY" ]; then
   if [ "$INTERACTIVE" = 1 ]; then read -r -p "  SNMP trap community the devices use [public]: " COMMUNITY; fi

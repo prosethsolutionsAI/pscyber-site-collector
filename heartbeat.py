@@ -99,6 +99,22 @@ def system(proc: str = "/proc", mounts: str = "/proc/mounts") -> dict:
     return out
 
 
+def feeds() -> dict:
+    """1.2.3+: is the cloud-feed file read by the Wazuh agent, and how big is each feed file."""
+    try:
+        localfile = "PSCYBER-FEEDS" in open("/var/ossec/etc/ossec.conf").read()
+    except OSError:
+        localfile = False
+    files = {}
+    try:
+        for f in os.listdir("/var/log/pscyber/feeds"):
+            if f.endswith(".json"):
+                files[f[:-5]] = os.path.getsize(f"/var/log/pscyber/feeds/{f}")
+    except OSError:
+        pass
+    return {"localfile": localfile, "files": files}
+
+
 def main() -> None:
     cfg = json.load(open(f"{ETC}/config.json"))
     platform_url = cfg.get("platform_url") or open(f"{ETC}/platform_url").read().strip()
@@ -122,6 +138,7 @@ def main() -> None:
         "ansible": ansible_version(),
         "os": platform.platform(),
         "system": system(),
+        "feeds": feeds(),
     }
     if os.path.exists(f"{ETC}/platform.pem"):
         # Pinned: only the exact certificate saved at install is trusted. The name
