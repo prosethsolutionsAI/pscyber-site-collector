@@ -44,12 +44,16 @@ else
   warn "no pinned platform certificate on this box - fetching unpinned"
 fi
 
+# Or (1.2.4+) the platform's PUBLIC certificate for its name (Certificates page) - verified by the
+# system's trusted CAs AND the hostname (no -k), the same rule the heartbeat follows. Never unverified.
+fetch() { "${CURL[@]}" "$1" -o "$2" || curl -sf --max-time 60 "$1" -o "$2"; }
+
 say "fetching the collector software from $PLATFORM"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 for f in heartbeat.py responder.py VERSION; do
-  "${CURL[@]}" "$PLATFORM/collector/files/$f" -o "$STAGE/$f" \
-    || die "cannot fetch $f (platform unreachable, or its certificate no longer matches the one pinned at install)"
+  fetch "$PLATFORM/collector/files/$f" "$STAGE/$f" \
+    || die "cannot fetch $f (platform unreachable, or its certificate matches neither the one pinned at install nor a trusted CA)"
   [ -s "$STAGE/$f" ] || die "$f came back empty - nothing changed"
 done
 python3 -m py_compile "$STAGE/heartbeat.py" "$STAGE/responder.py" 2>/dev/null \
@@ -151,7 +155,9 @@ if [ -s "$ETC/platform.pem" ]; then
   [ -n "$PIN" ] && CURL+=(--pinnedpubkey "sha256//$PIN")
 fi
 T=$(mktemp); trap 'rm -f "$T"' EXIT
-"${CURL[@]}" "$PLATFORM/collector/update.sh" -o "$T" || { echo "cannot fetch update.sh from $PLATFORM" >&2; exit 1; }
+# pinned first; else the platform's public certificate, verified by the system CAs AND the hostname
+"${CURL[@]}" "$PLATFORM/collector/update.sh" -o "$T" || curl -sf --max-time 60 "$PLATFORM/collector/update.sh" -o "$T" \
+  || { echo "cannot fetch update.sh from $PLATFORM" >&2; exit 1; }
 bash "$T"
 EOF
 chmod 755 /usr/local/sbin/pscyber-collector-update
@@ -196,6 +202,7 @@ case "${1:-status}" in
       printf '%-24s %s\n' "$s" "$(systemctl is-active "$s")"; done
     grep -h "^status=" /var/ossec/var/run/wazuh-agentd.state 2>/dev/null | sed 's/^/wazuh agent /'
     echo "syslog sources: $(ls /var/log/pscyber/syslog 2>/dev/null | wc -l)"
+    if ss -ltn 2>/dev/null | grep -q ':1520 '; then echo "device health relay      listening on 1520/tcp"; else echo "device health relay      not listening"; fi
     ;;
   update)
     [ "$(id -u)" -eq 0 ] || { echo "run as root: sudo pscyber-collector update"; exit 1; }
@@ -219,7 +226,7 @@ case "${1:-status}" in
     if command -v apt-get >/dev/null; then apt-get purge -y -qq wazuh-agent >/dev/null; else (dnf -y remove wazuh-agent || yum -y remove wazuh-agent) >/dev/null; fi
     rm -rf /var/ossec /etc/pscyber-collector /opt/pscyber-collector /var/log/pscyber /usr/local/bin/pscyber-collector /usr/local/sbin/pscyber-collector-update
     if command -v ufw >/dev/null; then
-      for r in 514/udp 514/tcp 162/udp 1514/tcp 1515/tcp; do ufw delete allow "$r" >/dev/null 2>&1; done
+      for r in 514/udp 514/tcp 162/udp 1514/tcp 1515/tcp 1520/tcp; do ufw delete allow "$r" >/dev/null 2>&1; done
     fi
     echo "PSCyber collector removed. Ask the SOC to revoke it in the platform (Collectors page)."
     ;;
@@ -227,6 +234,11 @@ case "${1:-status}" in
 esac
 EOF
 chmod 755 /usr/local/bin/pscyber-collector
+
+# 1.2.5: site machines send their live health (CPU, memory, disk) to this box on TCP 1520.
+if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+  ufw allow 1520/tcp comment "PSCyber collector device health" >/dev/null 2>&1 || true
+fi
 
 systemctl daemon-reload
 systemctl enable --now pscyber-heartbeat.timer >/dev/null 2>&1 || warn "heartbeat timer did not start (journalctl -u pscyber-heartbeat)"

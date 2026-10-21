@@ -39,12 +39,24 @@ def _ctx() -> ssl.SSLContext:
     return ssl._create_unverified_context()
 
 
+def _open(req, timeout: int, ctx: ssl.SSLContext):
+    """The certificate pinned at install first. If the platform now shows a PUBLIC certificate for its
+    name (Certificates page, 1.2.4+), that is accepted too - but only verified by the system's trusted
+    CAs AND for the platform's hostname, never "any certificate"."""
+    try:
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+    except urllib.error.URLError as e:
+        if not isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+            raise
+    return urllib.request.urlopen(req, timeout=timeout, context=ssl.create_default_context())
+
+
 def _post(path: str, body: dict, cfg: dict, ctx: ssl.SSLContext) -> dict:
     url = (cfg.get("platform_url") or open(f"{ETC}/platform_url").read().strip()) + path
     req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json",
                                           "Authorization": f"Bearer {cfg['api_secret']}"}, method="POST")
-    with urllib.request.urlopen(req, timeout=30, context=ctx) as r:
+    with _open(req, 30, ctx) as r:
         return json.loads(r.read() or b"{}")
 
 
@@ -458,9 +470,81 @@ def _work(job: dict, cfg: dict, ctx: ssl.SSLContext) -> None:
             time.sleep(3)
 
 
+# --------------------------------------------------------------- device health relay (1.2.5)
+# Site machines run the PSCyber device reporter (CPU, memory, disks, network, top processes every
+# 30 s). They only reach THIS box, never the internet - so they POST here, and this forwards each
+# reading to the platform on the same pinned HTTPS channel, signed with the COLLECTOR's own secret:
+# the machines carry no token at all. Numbers only, bounded; nothing here can run anything.
+RELAY_PORT = 1520
+RELAY_MAX = 64 * 1024
+
+
+def _relay_server(ctx: ssl.SSLContext):
+    import http.server
+    import socketserver
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        server_version = "pscyber-collector"
+
+        def log_message(self, *args):  # no access log: one line per machine every 30 s is noise
+            pass
+
+        def do_POST(self):
+            if self.path.split("?")[0] != "/report":
+                self.send_error(404)
+                return
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = 0
+            if not 0 < n <= RELAY_MAX:
+                self.send_error(413 if n > RELAY_MAX else 411)
+                return
+            try:
+                body = json.loads(self.rfile.read(n))
+                if not isinstance(body, dict):
+                    raise ValueError
+            except ValueError:
+                self.send_error(400)
+                return
+            body["from_ip"] = self.client_address[0]
+            try:
+                out = _post("/api/collectors/device-metrics", body, _cfg(), ctx)
+                code, reply = 200, {"ok": True, "host": out.get("host")}
+            except urllib.error.HTTPError as e:
+                code, reply = e.code, {"ok": False}
+            except Exception:  # noqa: BLE001 - platform unreachable: the machine retries in 30 s
+                code, reply = 502, {"ok": False}
+            data = json.dumps(reply).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            data = b"PSCyber collector device-health relay. Machines POST /report here.\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+        allow_reuse_address = True
+
+    return Server(("0.0.0.0", RELAY_PORT), Handler)
+
+
 def main() -> None:
     import threading
     ctx = _ctx()
+    try:
+        relay = _relay_server(ctx)
+        threading.Thread(target=relay.serve_forever, name="device-relay", daemon=True).start()
+    except OSError:
+        pass  # port taken: jobs still run; the heartbeat reports the relay as down
     busy: set = set()
     lock = threading.Lock()
 

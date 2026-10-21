@@ -8,6 +8,7 @@ sends them to the **PSCyber SOC** (Wazuh + PSCyber SOC Agentic AI):
 | Switches, routers, firewalls, anything that speaks **syslog** | the collector | **UDP/TCP 514** |
 | Devices sending **SNMP traps** | the collector | **UDP 162** |
 | **Wazuh agents** on the site's Windows / Linux servers and VMs | the collector (it relays them) | **TCP 1514, 1515** |
+| **Live device health** (CPU, memory, disk - numbers only) from the same servers, 1.2.5+ | the collector (it relays them over its HTTPS channel) | **TCP 1520** |
 
 The collector forwards everything to the SOC through **one outbound, mutual-TLS
 tunnel**. Nothing inbound has to be opened on the customer's firewall.

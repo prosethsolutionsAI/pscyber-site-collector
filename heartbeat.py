@@ -12,6 +12,7 @@ import platform
 import ssl
 import subprocess
 import time
+import urllib.error
 import urllib.request
 
 ETC = "/etc/pscyber-collector"
@@ -139,6 +140,7 @@ def main() -> None:
         "os": platform.platform(),
         "system": system(),
         "feeds": feeds(),
+        "platform_url": platform_url,  # the address this collector reaches the platform at (1.2.4+)
     }
     if os.path.exists(f"{ETC}/platform.pem"):
         # Pinned: only the exact certificate saved at install is trusted. The name
@@ -152,7 +154,15 @@ def main() -> None:
         f"{platform_url}/api/collectors/heartbeat",
         data=json.dumps({"version": open("/opt/pscyber-collector/VERSION").read().strip(), "facts": facts}).encode(),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {cfg['api_secret']}"}, method="POST")
-    with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
+    try:
+        resp = urllib.request.urlopen(req, timeout=15, context=ctx)
+    except urllib.error.URLError as e:
+        # The platform now shows a PUBLIC certificate for its name (Certificates page, 1.2.4+): accepted
+        # only verified by the system's trusted CAs AND for the platform's hostname - never "any".
+        if not isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+            raise
+        resp = urllib.request.urlopen(req, timeout=15, context=ssl.create_default_context())
+    with resp as r:
         reply = json.loads(r.read() or b"{}")
     # The SOC may change the site-agent enrolment password; keep ours current so
     # `pscyber-collector site-agent-command` always prints the working one.
@@ -163,8 +173,44 @@ def main() -> None:
         with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
             json.dump(cfg, f, indent=1)
         os.replace(tmp, f"{ETC}/config.json")
+    want = str(reply.get("platform_url") or "").rstrip("/")
+    if want and want != platform_url.rstrip("/"):
+        move_platform(cfg, want, ctx)
     if reply.get("update"):
         start_update()
+
+
+def _reach(url: str, ctx: ssl.SSLContext) -> bool:
+    """Can the platform be reached - and trusted - at this address? The same trust as the heartbeat:
+    the pinned certificate, or a public one verified by the system CAs for that name."""
+    for c in (ctx, ssl.create_default_context()):
+        try:
+            with urllib.request.urlopen(f"{url}/api/health", timeout=15, context=c) as r:
+                return r.status == 200
+        except urllib.error.URLError as e:
+            if not isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+                return False
+        except Exception:  # noqa: BLE001
+            return False
+    return False
+
+
+def move_platform(cfg: dict, url: str, ctx: ssl.SSLContext) -> None:
+    """The SOC chose another address for this collector (private / public by name / public by IP).
+    Moved only once the platform answers - and is trusted - there, so a wrong address never cuts the
+    collector off: it keeps the old one and the platform shows it has not moved yet."""
+    if not url.startswith("https://") or not _reach(url, ctx):
+        return
+    cfg["platform_url"] = url
+    tmp = f"{ETC}/config.json.new"
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        json.dump(cfg, f, indent=1)
+    os.replace(tmp, f"{ETC}/config.json")
+    with open(f"{ETC}/platform_url.new", "w") as f:
+        f.write(url + "\n")
+    os.replace(f"{ETC}/platform_url.new", f"{ETC}/platform_url")
+    # the responder reads the address on each request; restart it so nothing keeps the old one
+    subprocess.run(["systemctl", "restart", "pscyber-responder"], capture_output=True, timeout=30)
 
 
 def start_update() -> None:
