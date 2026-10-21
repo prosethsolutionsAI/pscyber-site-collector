@@ -212,10 +212,19 @@ case "${1:-status}" in
     ip=$(hostname -I | awk '{print $1}')
     pw=$(python3 -c "import json;print(json.load(open('/etc/pscyber-collector/config.json')).get('site_agent_enroll_password',''))")
     grp=$(python3 -c "import json;print(json.load(open('/etc/pscyber-collector/config.json'))['group'])")
-    extra=""; [ -n "$pw" ] && extra=" WAZUH_REGISTRATION_PASSWORD='$pw'"
-    echo "Linux (deb):  sudo WAZUH_MANAGER='$ip'$extra WAZUH_AGENT_GROUP='$grp' dpkg -i ./wazuh-agent_4.14.7-1_amd64.deb"
-    echo "Windows:      msiexec.exe /i wazuh-agent-4.14.7-1.msi /q WAZUH_MANAGER='$ip'$extra WAZUH_AGENT_GROUP='$grp'"
-    [ -z "$pw" ] && echo "(no enrolment password was provided by the platform - agents will be refused until ENROLL_PASSWORD is set there)"
+    raw="https://raw.githubusercontent.com/prosethsolutionsAI/pscyber-site-onboarding/main/agents"
+    echo "One line per machine - installs the Wazuh agent AND live device health, both through this collector."
+    echo "Each asks for the enrolment password (shown below - type or paste it when asked)."
+    echo
+    echo "Linux (as root):"
+    echo "  curl -fsSL $raw/install-agent-linux.sh | sudo bash -s -- --collector $ip --group $grp"
+    echo
+    echo "Windows (PowerShell as Administrator):"
+    echo "  iwr -UseBasicParsing $raw/install-agent-windows.ps1 -OutFile \$env:TEMP\\pscyber-agent.ps1; powershell -ExecutionPolicy Bypass -File \$env:TEMP\\pscyber-agent.ps1 -Collector $ip -Group $grp"
+    echo
+    if [ -n "$pw" ]; then echo "Enrolment password: $pw"
+    else echo "(no enrolment password was provided by the platform - agents will be refused until ENROLL_PASSWORD is set there)"; fi
+    echo "Add --no-health / -NoHealth to install the agent only."
     ;;
   uninstall)
     systemctl disable --now pscyber-tunnel pscyber-heartbeat.timer pscyber-responder 2>/dev/null
