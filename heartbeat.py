@@ -116,6 +116,21 @@ def feeds() -> dict:
     return {"localfile": localfile, "files": files}
 
 
+def site_ip() -> str:
+    """1.2.7+: this box's address ON THE SITE NETWORK - what agents and devices there must use. The
+    platform cannot see it: a site collector reaches us through the customer's NAT, so the address
+    we see is their public one. The same first address `site-agent-command` prints; a private one
+    is preferred if the box has several."""
+    import ipaddress
+    try:
+        addrs = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=5).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    v4 = [a for a in addrs if ":" not in a]
+    private = [a for a in v4 if ipaddress.ip_address(a).is_private and not a.startswith(("172.17.", "127."))]
+    return (private or v4 or [""])[0]
+
+
 def main() -> None:
     cfg = json.load(open(f"{ETC}/config.json"))
     platform_url = cfg.get("platform_url") or open(f"{ETC}/platform_url").read().strip()
@@ -141,6 +156,7 @@ def main() -> None:
         "system": system(),
         "feeds": feeds(),
         "platform_url": platform_url,  # the address this collector reaches the platform at (1.2.4+)
+        "site_ip": site_ip(),  # the address site machines use to reach THIS box (1.2.7+)
     }
     if os.path.exists(f"{ETC}/platform.pem"):
         # Pinned: only the exact certificate saved at install is trusted. The name
