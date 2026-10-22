@@ -51,12 +51,12 @@ fetch() { "${CURL[@]}" "$1" -o "$2" || curl -sf --max-time 60 "$1" -o "$2"; }
 say "fetching the collector software from $PLATFORM"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
-for f in heartbeat.py responder.py VERSION; do
+for f in heartbeat.py responder.py snmp_poller.py snmp_traps.py VERSION; do
   fetch "$PLATFORM/collector/files/$f" "$STAGE/$f" \
     || die "cannot fetch $f (platform unreachable, or its certificate matches neither the one pinned at install nor a trusted CA)"
   [ -s "$STAGE/$f" ] || die "$f came back empty - nothing changed"
 done
-python3 -m py_compile "$STAGE/heartbeat.py" "$STAGE/responder.py" 2>/dev/null \
+python3 -m py_compile "$STAGE/heartbeat.py" "$STAGE/responder.py" "$STAGE/snmp_poller.py" "$STAGE/snmp_traps.py" 2>/dev/null \
   || die "the downloaded code does not compile - nothing changed"
 NEW=$(tr -d '[:space:]' < "$STAGE/VERSION")
 OLD=$(tr -d '[:space:]' < "$OPT/VERSION" 2>/dev/null || true)
@@ -106,6 +106,23 @@ if [ ${#need[@]} -gt 0 ]; then
   python3 -c 'import winrm' 2>/dev/null || warn "pywinrm is missing - Windows hosts cannot be reached"
 fi
 
+# ------------------------------------------------------------------ SNMP (1.3.0+ polling, 1.3.1+ own trap receiver)
+# net-snmp's own tools do the polling (snmpget / snmpbulkwalk). Traps: the responder receives them
+# itself on UDP 162 (snmp_traps.py) - snmptrapd on Ubuntu 26.04 takes trap packets in and processes
+# none (seen live, every configuration). It is switched off - service AND socket - so the port is free;
+# the same trap log is written, so the Wazuh agent reads traps exactly as before.
+if ! command -v snmpbulkwalk >/dev/null; then
+  say "installing the SNMP tools (net-snmp)"
+  if command -v apt-get >/dev/null; then pkg_install 300 snmp; else pkg_install 300 net-snmp-utils; fi
+  command -v snmpbulkwalk >/dev/null || warn "net-snmp tools missing - SNMP polling cannot run (traps still do)"
+fi
+if systemctl list-unit-files 'snmptrapd*' --no-legend 2>/dev/null | grep -q snmptrapd; then
+  systemctl disable --now snmptrapd.socket snmptrapd.service >/dev/null 2>&1
+  systemctl mask snmptrapd.socket snmptrapd.service >/dev/null 2>&1
+  ok "snmptrapd switched off - this collector receives SNMP traps itself (UDP 162)"
+fi
+touch /var/log/pscyber/snmptraps.log 2>/dev/null && chmod 640 /var/log/pscyber/snmptraps.log
+
 # ------------------------------------------------------------------ cloud feeds (1.2.3+)
 # FortiEDR events arrive from the platform (the responder writes them); the Wazuh agent reads them
 # as JSON, labelled as this customer. Added ONCE - the only time an update touches the agent - and
@@ -137,7 +154,7 @@ fi
 
 # ------------------------------------------------------------------ software
 mkdir -p "$OPT" /var/log/pscyber
-for f in heartbeat.py responder.py VERSION; do
+for f in heartbeat.py responder.py snmp_poller.py snmp_traps.py VERSION; do
   install -m 644 "$STAGE/$f" "$OPT/$f.new" && mv -f "$OPT/$f.new" "$OPT/$f" || die "could not install $f"
 done
 
@@ -198,11 +215,12 @@ cat > /usr/local/bin/pscyber-collector <<'EOF'
 case "${1:-status}" in
   status)
     echo "version                  $(cat /opt/pscyber-collector/VERSION 2>/dev/null)"
-    for s in pscyber-tunnel wazuh-agent rsyslog snmptrapd pscyber-heartbeat.timer pscyber-responder; do
+    for s in pscyber-tunnel wazuh-agent rsyslog pscyber-heartbeat.timer pscyber-responder; do
       printf '%-24s %s\n' "$s" "$(systemctl is-active "$s")"; done
     grep -h "^status=" /var/ossec/var/run/wazuh-agentd.state 2>/dev/null | sed 's/^/wazuh agent /'
     echo "syslog sources: $(ls /var/log/pscyber/syslog 2>/dev/null | wc -l)"
     if ss -ltn 2>/dev/null | grep -q ':1520 '; then echo "device health relay      listening on 1520/tcp"; else echo "device health relay      not listening"; fi
+    if ss -lunp 2>/dev/null | grep ':162 ' | grep -q python; then echo "SNMP trap receiver       listening on 162/udp"; else echo "SNMP trap receiver       NOT listening on 162/udp"; fi
     ;;
   update)
     [ "$(id -u)" -eq 0 ] || { echo "run as root: sudo pscyber-collector update"; exit 1; }
@@ -231,6 +249,7 @@ case "${1:-status}" in
     systemctl stop wazuh-agent 2>/dev/null
     rm -f /etc/systemd/system/pscyber-tunnel.service /etc/systemd/system/pscyber-heartbeat.{service,timer} /etc/systemd/system/pscyber-responder.service
     rm -rf /etc/systemd/system/snmptrapd.service.d/pscyber.conf /etc/rsyslog.d/30-pscyber-collector.conf
+    systemctl unmask snmptrapd.socket snmptrapd.service >/dev/null 2>&1   # 1.3.1+ masked it to take UDP 162
     systemctl daemon-reload; systemctl restart rsyslog 2>/dev/null; systemctl restart snmptrapd 2>/dev/null
     if command -v apt-get >/dev/null; then apt-get purge -y -qq wazuh-agent >/dev/null; else (dnf -y remove wazuh-agent || yum -y remove wazuh-agent) >/dev/null; fi
     rm -rf /var/ossec /etc/pscyber-collector /opt/pscyber-collector /var/log/pscyber /usr/local/bin/pscyber-collector /usr/local/sbin/pscyber-collector-update

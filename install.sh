@@ -196,7 +196,7 @@ mkdir -p /etc/systemd/system/snmptrapd.service.d
 cat > /etc/systemd/system/snmptrapd.service.d/pscyber.conf <<'EOF'
 [Service]
 ExecStart=
-ExecStart=/usr/sbin/snmptrapd -Ls5 -f udp:162 udp6:162
+ExecStart=/usr/sbin/snmptrapd -Ls5 -On -f udp:162 udp6:162
 EOF
 
 # ------------------------------------------------------------------ Wazuh agent (through the tunnel)

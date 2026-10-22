@@ -6,7 +6,8 @@ sends them to the **PSCyber SOC** (Wazuh + PSCyber SOC Agentic AI):
 | From the site | Sent to | Port on the collector |
 |---|---|---|
 | Switches, routers, firewalls, anything that speaks **syslog** | the collector | **UDP/TCP 514** |
-| Devices sending **SNMP traps** | the collector | **UDP 162** |
+| Devices sending **SNMP traps** (v1, v2c, v3) | the collector | **UDP 162** |
+| **SNMP polling** of firewalls / switches / routers (CPU, memory, interfaces), 1.3.0+ | the collector asks them, **outbound UDP 161** | - |
 | **Wazuh agents** on the site's Windows / Linux servers and VMs | the collector (it relays them) | **TCP 1514, 1515** |
 | **Live device health** (CPU, memory, disk - numbers only) from the same servers, 1.2.5+ | the collector (it relays them over its HTTPS channel) | **TCP 1520** |
 
@@ -17,7 +18,7 @@ tunnel**. Nothing inbound has to be opened on the customer's firewall.
  switches / firewalls ──syslog 514──┐
  devices ─────────SNMP traps 162────┤                          ┌──────────── PSCyber SOC ────────────┐
  Windows / Linux agents ─1514/1515──┤  PSCyber Site Collector  │                                     │
-                                    └─►  rsyslog · snmptrapd ──┼─► gateway ─► Wazuh ─► Agentic AI    │
+                                    └─►  rsyslog · SNMP ───────┼─► gateway ─► Wazuh ─► Agentic AI    │
                                          Wazuh agent · stunnel │   (mTLS)                           │
                                          ═════ mutual TLS ═════┘                                     │
                                                                 └─────────────────────────────────────┘
@@ -62,14 +63,23 @@ The installer:
 ## After installing
 
 ```bash
-pscyber-collector status               # tunnel, agent, syslog, traps, heartbeat
+pscyber-collector status               # tunnel, agent, syslog, trap receiver, heartbeat
 pscyber-collector site-agent-command   # the command to put Windows/Linux agents on this collector
 ```
 
 - **Syslog**: point devices at the collector's IP, **UDP or TCP 514**. Each device's
   logs land in `/var/log/pscyber/syslog/<device-ip>.log` and are shipped to the SOC.
-- **SNMP traps**: point devices at the collector's IP, **UDP 162**, with the community
-  you gave the wizard (default `public` - change it on the devices and re-run the installer).
+- **SNMP traps**: point devices at the collector's IP, **UDP 162**. The communities and
+  SNMPv3 users it accepts are managed by PSCyber in the SOC platform (until then: the
+  community you gave the wizard). From 1.3.1 the collector receives traps itself - v1, v2c,
+  v2c informs (answered) and v3 (MD5/SHA-1/SHA-2 authentication, DES/AES privacy) - and
+  `snmptrapd` is switched off: on Ubuntu 26.04 it took trap packets in and processed none.
+  Traps go to `/var/log/pscyber/snmptraps.log`, read by the Wazuh agent as before.
+- **SNMP polling** (1.3.0+): PSCyber adds your network devices and their SNMP credential
+  (v2c community or v3 user) in the SOC platform; the collector polls each one every 60 s
+  (UDP 161, from inside your network) for CPU, memory, sessions, uptime and every
+  interface's state and traffic. On each device, allow SNMP from the collector's address.
+  Credentials are never written to disk on the collector nor put on a command line.
 - **Site Wazuh agents**: install them with `WAZUH_MANAGER=<collector IP>` (the command
   above prints the exact line) - they reach the SOC through the collector.
 - **The box itself** (1.2.2+): the heartbeat also reports its CPU, load, memory and disk
@@ -164,5 +174,7 @@ Then ask PSCyber to revoke the collector in the SOC platform.
 | `update.sh` | Installs / updates the collector software (heartbeat, responder, commands); used by the installer too |
 | `heartbeat.py` | Health report to the SOC platform (runs every minute); starts an update when the SOC asks |
 | `responder.py` | Checks the site's hosts and runs the SOC's commands and approved playbooks on them (SSH / WinRM / Ansible) |
+| `snmp_poller.py` | SNMP polling of the network devices set up in the SOC platform (CPU, memory, interfaces) |
+| `snmp_traps.py` | SNMP trap receiver on UDP 162 (v1 / v2c / informs / v3) |
 | `o365.sh` | Optional: fetch the customer's Microsoft 365 audit logs (asks for the secret, tests first) |
 | `VERSION` | Collector version |

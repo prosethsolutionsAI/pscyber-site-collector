@@ -545,6 +545,14 @@ def main() -> None:
         threading.Thread(target=relay.serve_forever, name="device-relay", daemon=True).start()
     except OSError:
         pass  # port taken: jobs still run; the heartbeat reports the relay as down
+    # 1.3.0: SNMP polling + traps, configured from Agentic (snmp_poller.py, beside this file)
+    try:
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import snmp_poller
+        snmp_poller.start(lambda path, body: _post(path, body, _cfg(), ctx))
+    except Exception:  # noqa: BLE001 - SNMP must never stop the jobs
+        pass
     busy: set = set()
     lock = threading.Lock()
 
