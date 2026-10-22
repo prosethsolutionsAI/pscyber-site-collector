@@ -131,6 +131,15 @@ def site_ip() -> str:
     return (private or v4 or [""])[0]
 
 
+def trap_receiver() -> str:
+    """"active" when UDP 162 is being listened on (the responder's receiver, or snmptrapd on an older box)."""
+    try:
+        out = subprocess.run(["ss", "-lun"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return "active" if any(":162 " in line for line in out.splitlines()) else "inactive"
+
+
 def main() -> None:
     cfg = json.load(open(f"{ETC}/config.json"))
     platform_url = cfg.get("platform_url") or open(f"{ETC}/platform_url").read().strip()
@@ -143,7 +152,10 @@ def main() -> None:
         pass
     traps = os.path.getsize("/var/log/pscyber/snmptraps.log") if os.path.exists("/var/log/pscyber/snmptraps.log") else 0
     facts = {
-        "services": {u: active(u) for u in ("pscyber-tunnel", "wazuh-agent", "rsyslog", "snmptrapd", "pscyber-responder")},
+        # 1.3.1+: traps are received by the responder itself (snmptrapd is switched off on purpose) -
+        # what matters is that something listens on UDP 162
+        "services": {**{u: active(u) for u in ("pscyber-tunnel", "wazuh-agent", "rsyslog", "pscyber-responder")},
+                     "snmp trap receiver (162/udp)": trap_receiver()},
         "wazuh_agent": agent_state(),
         "syslog_sources": sorted(sources, key=lambda s: -s["bytes"])[:50],
         "syslog_source_count": len(sources),
