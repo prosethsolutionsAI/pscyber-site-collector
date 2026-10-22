@@ -131,6 +131,25 @@ def site_ip() -> str:
     return (private or v4 or [""])[0]
 
 
+def agent_peers() -> list:
+    """1.3.3+: the site machines whose Wazuh agent is connected THROUGH this box right now (TCP 1514
+    / 1515) - the collector's own agent and this box's addresses left out. Addresses only."""
+    try:
+        out = subprocess.run(["ss", "-Htn", "state", "established", "( sport = :1514 or sport = :1515 )"],
+                             capture_output=True, text=True, timeout=5).stdout
+        own = set(subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=5).stdout.split())
+    except (OSError, subprocess.SubprocessError):
+        return []
+    peers = set()
+    for line in out.splitlines():
+        cols = line.split()
+        if len(cols) >= 4:
+            ip = cols[3].rsplit(":", 1)[0].strip("[]").removeprefix("::ffff:")
+            if ip and not ip.startswith("127.") and ip != "::1" and ip not in own:
+                peers.add(ip)
+    return sorted(peers)[:200]
+
+
 def trap_receiver() -> str:
     """"active" when UDP 162 is being listened on (the responder's receiver, or snmptrapd on an older box)."""
     try:
@@ -146,6 +165,8 @@ def main() -> None:
     sources = []
     try:
         for f in os.listdir("/var/log/pscyber/syslog"):
+            if not f.endswith(".log"):
+                continue  # rotated copies (.log.1, .gz) and a set-aside .backlog are not devices
             p = f"/var/log/pscyber/syslog/{f}"
             sources.append({"device": f.removesuffix(".log"), "bytes": os.path.getsize(p)})
     except OSError:
@@ -159,6 +180,7 @@ def main() -> None:
         "wazuh_agent": agent_state(),
         "syslog_sources": sorted(sources, key=lambda s: -s["bytes"])[:50],
         "syslog_source_count": len(sources),
+        "agent_peers": agent_peers(),  # site Wazuh agents relayed through this box (1.3.3+)
         "snmptrap_log_bytes": traps,
         # Which host types the responder can reach from here: SSH needs paramiko, WinRM pywinrm.
         "responder_libs": {m: _importable(m) for m in ("paramiko", "winrm")},

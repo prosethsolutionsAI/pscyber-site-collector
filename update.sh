@@ -123,6 +123,46 @@ if systemctl list-unit-files 'snmptrapd*' --no-legend 2>/dev/null | grep -q snmp
 fi
 touch /var/log/pscyber/snmptraps.log 2>/dev/null && chmod 640 /var/log/pscyber/snmptraps.log
 
+# ------------------------------------------------------------------ log rotation (1.3.3+)
+# The per-device syslog files and the trap log are only this box's relay copy - the Wazuh agent
+# has already shipped every line to the SOC. They were never rotated: a busy FortiGate wrote 3 GB a
+# day into one file (142 GB found). Daily or at 1 GB, three kept, compressed. rsyslog reopens its
+# files on HUP; the Wazuh agent follows a rotated file by itself.
+cat > /etc/logrotate.d/pscyber-collector <<'EOF'
+/var/log/pscyber/syslog/*.log /var/log/pscyber/snmptraps.log {
+    su syslog syslog
+    daily
+    maxsize 1G
+    rotate 3
+    compress
+    delaycompress
+    missingok
+    notifempty
+    sharedscripts
+    postrotate
+        systemctl kill -s HUP rsyslog.service >/dev/null 2>&1 || true
+    endscript
+}
+EOF
+# logrotate checks once a day by default; at 3 GB/day that lets a file reach 3 GB. Hourly keeps it near 1 GB.
+if [ -d /etc/systemd/system ] && systemctl list-unit-files logrotate.timer --no-legend 2>/dev/null | grep -q logrotate; then
+  mkdir -p /etc/systemd/system/logrotate.timer.d
+  printf '[Timer]\nOnCalendar=\nOnCalendar=hourly\nAccuracySec=1m\n' > /etc/systemd/system/logrotate.timer.d/pscyber.conf
+  systemctl daemon-reload; systemctl restart logrotate.timer >/dev/null 2>&1
+fi
+# A file that grew huge before rotation existed is SET ASIDE, never deleted here: compressing it in
+# place could take hours of CPU on a box that matters. Its lines already reached the SOC; delete it
+# when the customer agrees (shown below and by `pscyber-collector status`).
+moved=0
+for f in /var/log/pscyber/syslog/*.log; do
+  [ -f "$f" ] || continue
+  if [ "$(stat -c %s "$f")" -gt $((5 * 1024 * 1024 * 1024)) ]; then
+    mv "$f" "$f.backlog" && moved=1 && warn "$(basename "$f") was $(du -h "$f.backlog" | cut -f1) - set aside as $f.backlog (already sent to the SOC; delete it to free the disk)"
+  fi
+done
+[ "$moved" = 1 ] && systemctl kill -s HUP rsyslog.service >/dev/null 2>&1
+logrotate --debug /etc/logrotate.d/pscyber-collector >/dev/null 2>&1 || warn "logrotate rejected the collector's rotation rule (logrotate --debug /etc/logrotate.d/pscyber-collector)"
+
 # ------------------------------------------------------------------ cloud feeds (1.2.3+)
 # FortiEDR events arrive from the platform (the responder writes them); the Wazuh agent reads them
 # as JSON, labelled as this customer. Added ONCE - the only time an update touches the agent - and
@@ -221,6 +261,7 @@ case "${1:-status}" in
     echo "syslog sources: $(ls /var/log/pscyber/syslog 2>/dev/null | wc -l)"
     if ss -ltn 2>/dev/null | grep -q ':1520 '; then echo "device health relay      listening on 1520/tcp"; else echo "device health relay      not listening"; fi
     if ss -lunp 2>/dev/null | grep ':162 ' | grep -q python; then echo "SNMP trap receiver       listening on 162/udp"; else echo "SNMP trap receiver       NOT listening on 162/udp"; fi
+    for b in /var/log/pscyber/syslog/*.backlog; do [ -f "$b" ] && echo "old log set aside        $b ($(du -h "$b" | cut -f1)) - already sent to the SOC, safe to delete"; done
     ;;
   update)
     [ "$(id -u)" -eq 0 ] || { echo "run as root: sudo pscyber-collector update"; exit 1; }

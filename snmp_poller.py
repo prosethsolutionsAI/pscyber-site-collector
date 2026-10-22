@@ -134,6 +134,13 @@ def _avg(values) -> float | None:
     return round(sum(xs) / len(xs), 1) if xs else None
 
 
+def _cores(out: dict, per_core: dict) -> None:
+    """How many cores and the busiest one: an average near 0 can hide one saturated core (1.3.3+)."""
+    vals = [x for x in (_f(v) for v in per_core.values()) if x is not None]
+    if vals:
+        out["cpu_cores"], out["cpu_max"] = len(vals), max(vals)
+
+
 # --------------------------------------------------------------- one poll
 
 def _vendor_metrics(s: Snmp, oid: str) -> dict:
@@ -158,6 +165,7 @@ def _vendor_metrics(s: Snmp, oid: str) -> dict:
             out["sessions"] = _i(g[".1.3.6.1.4.1.12356.101.4.1.8.0"])
         out["firmware"] = g.get(".1.3.6.1.4.1.12356.101.4.1.1.0") or None
         out["serial"] = g.get(".1.3.6.1.4.1.12356.100.1.1.1.0") or None
+        _cores(out, s.walk(".1.3.6.1.4.1.12356.101.4.4.2.1.2"))     # fgProcessorUsage, per core
     elif oid.startswith(".1.3.6.1.4.1.9."):                       # Cisco
         cpu = _avg(s.walk(".1.3.6.1.4.1.9.9.109.1.1.1.1.8").values()) or _avg(s.walk(".1.3.6.1.4.1.9.9.109.1.1.1.1.5").values())
         if cpu is not None:
@@ -181,7 +189,9 @@ def _vendor_metrics(s: Snmp, oid: str) -> dict:
         if g.get(".1.3.6.1.4.1.25461.2.1.2.3.3.0") is not None:
             out["sessions"] = _i(g[".1.3.6.1.4.1.25461.2.1.2.3.3.0"])
     if out.get("cpu") is None:                                    # standard: HOST-RESOURCES, then UCD (Linux)
-        cpu = _avg(s.walk(".1.3.6.1.2.1.25.3.3.1.2").values())
+        loads = s.walk(".1.3.6.1.2.1.25.3.3.1.2")
+        cpu = _avg(loads.values())
+        _cores(out, loads)
         if cpu is None:
             idle = _f(s.get([".1.3.6.1.4.1.2021.11.11.0"]).get(".1.3.6.1.4.1.2021.11.11.0"))
             if idle is not None:
