@@ -553,6 +553,15 @@ def main() -> None:
         snmp_poller.start(lambda path, body: _post(path, body, _cfg(), ctx))
     except Exception:  # noqa: BLE001 - SNMP must never stop the jobs
         pass
+    # 1.4.0: synthetic tests (ping / web / DNS / TCP / path), configured from Agentic and the portal
+    try:
+        import sys
+        if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import synthetic
+        synthetic.start(lambda path, body: _post(path, body, _cfg(), ctx))
+    except Exception:  # noqa: BLE001 - the tests must never stop the jobs
+        pass
     busy: set = set()
     lock = threading.Lock()
 

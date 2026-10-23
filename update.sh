@@ -51,12 +51,12 @@ fetch() { "${CURL[@]}" "$1" -o "$2" || curl -sf --max-time 60 "$1" -o "$2"; }
 say "fetching the collector software from $PLATFORM"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
-for f in heartbeat.py responder.py snmp_poller.py snmp_traps.py VERSION; do
+for f in heartbeat.py responder.py snmp_poller.py snmp_traps.py synthetic.py VERSION; do
   fetch "$PLATFORM/collector/files/$f" "$STAGE/$f" \
     || die "cannot fetch $f (platform unreachable, or its certificate matches neither the one pinned at install nor a trusted CA)"
   [ -s "$STAGE/$f" ] || die "$f came back empty - nothing changed"
 done
-python3 -m py_compile "$STAGE/heartbeat.py" "$STAGE/responder.py" "$STAGE/snmp_poller.py" "$STAGE/snmp_traps.py" 2>/dev/null \
+python3 -m py_compile "$STAGE/heartbeat.py" "$STAGE/responder.py" "$STAGE/snmp_poller.py" "$STAGE/snmp_traps.py" "$STAGE/synthetic.py" 2>/dev/null \
   || die "the downloaded code does not compile - nothing changed"
 NEW=$(tr -d '[:space:]' < "$STAGE/VERSION")
 OLD=$(tr -d '[:space:]' < "$OPT/VERSION" 2>/dev/null || true)
@@ -116,6 +116,18 @@ if ! command -v snmpbulkwalk >/dev/null; then
   if command -v apt-get >/dev/null; then pkg_install 300 snmp; else pkg_install 300 net-snmp-utils; fi
   command -v snmpbulkwalk >/dev/null || warn "net-snmp tools missing - SNMP polling cannot run (traps still do)"
 fi
+# ------------------------------------------------------------------ synthetic tests (1.4.0+, synthetic.py)
+# ping, dig and traceroute - the standard tools the tests use (a web or TCP test needs none of them).
+missing=()
+command -v ping >/dev/null || missing+=(iputils-ping)
+command -v dig >/dev/null || missing+=(dnsutils)
+command -v traceroute >/dev/null || missing+=(traceroute)
+if [ ${#missing[@]} -gt 0 ]; then
+  say "installing the synthetic test tools: ${missing[*]}"
+  if command -v apt-get >/dev/null; then pkg_install 300 "${missing[@]}"; else pkg_install 300 iputils bind-utils traceroute; fi
+  for x in ping dig traceroute; do command -v $x >/dev/null || warn "$x missing - those synthetic tests report it instead of running"; done
+fi
+
 if systemctl list-unit-files 'snmptrapd*' --no-legend 2>/dev/null | grep -q snmptrapd; then
   systemctl disable --now snmptrapd.socket snmptrapd.service >/dev/null 2>&1
   systemctl mask snmptrapd.socket snmptrapd.service >/dev/null 2>&1
@@ -194,7 +206,7 @@ fi
 
 # ------------------------------------------------------------------ software
 mkdir -p "$OPT" /var/log/pscyber
-for f in heartbeat.py responder.py snmp_poller.py snmp_traps.py VERSION; do
+for f in heartbeat.py responder.py snmp_poller.py snmp_traps.py synthetic.py VERSION; do
   install -m 644 "$STAGE/$f" "$OPT/$f.new" && mv -f "$OPT/$f.new" "$OPT/$f" || die "could not install $f"
 done
 

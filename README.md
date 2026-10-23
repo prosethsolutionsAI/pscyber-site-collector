@@ -86,6 +86,16 @@ pscyber-collector site-agent-command   # the command to put Windows/Linux agents
   use - numbers only - so the SOC sees a full disk or memory shortage before it stops the
   collector.
 
+## Synthetic tests (version 1.4.0+)
+
+The collector can test your network the way a user does, from inside it: **ping** (latency, jitter,
+packet loss), a **web page or API** (status code, DNS / connect / TLS / first-byte time, an optional
+keyword), a **DNS lookup** (time and answer), a **TCP port** (connect time) and the **path hop by hop**
+(latency and loss at every hop). You choose the tests and their thresholds in your SOC portal
+(*Network health → Synthetic & experience*); the collector runs them on schedule and reports what it
+measured. It uses the standard `ping`, `dig` and `traceroute` tools (installed by `update.sh`), and every
+target reaches them as an argument - never through a shell.
+
 ## Reaching the site's servers (responder)
 
 The collector also runs a **responder**: the SOC adds the site's hosts in the platform
@@ -176,5 +186,6 @@ Then ask PSCyber to revoke the collector in the SOC platform.
 | `responder.py` | Checks the site's hosts and runs the SOC's commands and approved playbooks on them (SSH / WinRM / Ansible) |
 | `snmp_poller.py` | SNMP polling of the network devices set up in the SOC platform (CPU, memory, interfaces) |
 | `snmp_traps.py` | SNMP trap receiver on UDP 162 (v1 / v2c / informs / v3) |
+| `synthetic.py` | Synthetic tests: ping, web, DNS, TCP port, path hop by hop (1.4.0+) |
 | `o365.sh` | Optional: fetch the customer's Microsoft 365 audit logs (asks for the secret, tests first) |
 | `VERSION` | Collector version |
