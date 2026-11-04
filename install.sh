@@ -250,7 +250,12 @@ if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   for r in 514/udp 514/tcp 162/udp 1514/tcp 1515/tcp; do ufw allow "$r" comment "PSCyber collector" >/dev/null; done
 fi
 systemctl daemon-reload
-systemctl enable --now pscyber-tunnel >/dev/null 2>&1 || die "tunnel failed to start (journalctl -u pscyber-tunnel)"
+# RESTART, not `enable --now`: on a re-install the tunnel is already running and `--now` leaves it alone,
+# still presenting the PREVIOUS certificate - which the re-enrolment has just revoked. It keeps working
+# until the gateway next reloads its CRL, then the agent is cut off with "certificate revoked" while the
+# heartbeat (API secret, not the certificate) still says online. Seen live: PSB-MDR-PROSETH, 2026-11-03.
+systemctl enable pscyber-tunnel >/dev/null 2>&1
+systemctl restart pscyber-tunnel || die "tunnel failed to start (journalctl -u pscyber-tunnel)"
 systemctl restart rsyslog || die "rsyslog failed (journalctl -u rsyslog)"
 systemctl enable snmptrapd >/dev/null 2>&1; systemctl restart snmptrapd || warn "snmptrapd did not start"
 systemctl enable wazuh-agent >/dev/null 2>&1; systemctl restart wazuh-agent || die "wazuh-agent failed to start"
