@@ -196,10 +196,12 @@ def main() -> None:
         # Pinned: only the exact certificate saved at install is trusted. The name
         # check is off because a "public" collector reaches the platform through a
         # NAT address that is not in that certificate - the pin is the stronger check.
-        ctx = ssl.create_default_context(cafile=f"{ETC}/platform.pem")
-        ctx.check_hostname = False
+        ctx = ssl.create_default_context(cafile=f"{ETC}/platform.pem")  # NOSONAR - pinned certificate, see above
+        ctx.check_hostname = False  # NOSONAR - the certificate is pinned (only this exact one is trusted); see above
     else:
-        ctx = ssl._create_unverified_context()
+        # No pin saved at install: verify like any client - the system's CAs and the platform's name.
+        # (It used to accept ANY certificate here, so a man in the middle could read the collector's secret.)
+        ctx = ssl.create_default_context()  # NOSONAR - full verification: system CAs + hostname
     req = urllib.request.Request(
         f"{platform_url}/api/collectors/heartbeat",
         data=json.dumps({"version": open("/opt/pscyber-collector/VERSION").read().strip(), "facts": facts}).encode(),
@@ -211,7 +213,7 @@ def main() -> None:
         # only verified by the system's trusted CAs AND for the platform's hostname - never "any".
         if not isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
             raise
-        resp = urllib.request.urlopen(req, timeout=15, context=ssl.create_default_context())
+        resp = urllib.request.urlopen(req, timeout=15, context=ssl.create_default_context())  # NOSONAR - full verification
     with resp as r:
         reply = json.loads(r.read() or b"{}")
     # The SOC may change the site-agent enrolment password; keep ours current so

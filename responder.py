@@ -33,10 +33,11 @@ def _cfg() -> dict:
 
 def _ctx() -> ssl.SSLContext:
     if os.path.exists(f"{ETC}/platform.pem"):
-        ctx = ssl.create_default_context(cafile=f"{ETC}/platform.pem")
-        ctx.check_hostname = False  # a public collector reaches a NAT address not in the cert; the pin is the check
+        ctx = ssl.create_default_context(cafile=f"{ETC}/platform.pem")  # NOSONAR - pinned certificate
+        ctx.check_hostname = False  # NOSONAR - a public collector reaches a NAT address not in the cert; the pin is the check
         return ctx
-    return ssl._create_unverified_context()
+    # No pin saved at install: verify like any client (system CAs + the platform's name) - never "any certificate".
+    return ssl.create_default_context()
 
 
 def _open(req, timeout: int, ctx: ssl.SSLContext):
@@ -48,7 +49,7 @@ def _open(req, timeout: int, ctx: ssl.SSLContext):
     except urllib.error.URLError as e:
         if not isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
             raise
-    return urllib.request.urlopen(req, timeout=timeout, context=ssl.create_default_context())
+    return urllib.request.urlopen(req, timeout=timeout, context=ssl.create_default_context())  # NOSONAR - full verification
 
 
 def _post(path: str, body: dict, cfg: dict, ctx: ssl.SSLContext) -> dict:

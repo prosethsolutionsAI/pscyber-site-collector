@@ -70,16 +70,22 @@ ok "fetched ${NEW} (this box had ${OLD:-nothing})"
 # than the platform's 8-minute update window on a firewalled manager).
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1
 NET_OPTS=(-o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=1)
+# keep a changed config file as it is, never ask (dpkg would otherwise prompt about it)
+DPKG_OPTS=(-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+# </dev/null on every package step: nothing may read the terminal. Under `timeout` a command that does
+# is STOPPED by the kernel (SIGTTIN) and the install hangs for ever holding the update lock - seen live
+# 2026-10-31 on PSB-MDR-PROSETH: stuck 2 days in apt-get, the heartbeat never installed. -k: a step that
+# ignores the polite stop is killed 10 s later.
 pkg_install() {  # pkg_install <seconds> <package...> - best effort, never longer than that
   local limit=$1; shift
   if command -v apt-get >/dev/null; then
-    timeout "$limit" apt-get install -y -qq -o DPkg::Lock::Timeout=120 "${NET_OPTS[@]}" "$@" >/dev/null 2>&1 && return 0
+    timeout -k 10 "$limit" apt-get install -y -qq -o DPkg::Lock::Timeout=120 "${DPKG_OPTS[@]}" "${NET_OPTS[@]}" "$@" </dev/null >/dev/null 2>&1 && return 0
     say "  refreshing the package lists first (this box's mirrors may be slow)"
-    timeout "$limit" apt-get update -qq "${NET_OPTS[@]}" >/dev/null 2>&1
-    timeout "$limit" apt-get install -y -qq -o DPkg::Lock::Timeout=120 "${NET_OPTS[@]}" "$@" >/dev/null 2>&1
+    timeout -k 10 "$limit" apt-get update -qq "${NET_OPTS[@]}" </dev/null >/dev/null 2>&1
+    timeout -k 10 "$limit" apt-get install -y -qq -o DPkg::Lock::Timeout=120 "${DPKG_OPTS[@]}" "${NET_OPTS[@]}" "$@" </dev/null >/dev/null 2>&1
   else
     local pm; pm=$(command -v dnf || command -v yum)
-    timeout "$limit" "$pm" -y -q install "$@" >/dev/null 2>&1
+    timeout -k 10 "$limit" "$pm" -y -q install "$@" </dev/null >/dev/null 2>&1
   fi
 }
 
@@ -96,10 +102,11 @@ if [ ${#need[@]} -gt 0 ]; then
     pkg_install 300 "${pkgs[@]}"
   else
     PM=$(command -v dnf || command -v yum)
-    [[ " ${need[*]} " == *" paramiko "* ]] && "$PM" -y -q install python3-paramiko >/dev/null 2>&1
+    [[ " ${need[*]} " == *" paramiko "* ]] && "$PM" -y -q install python3-paramiko </dev/null >/dev/null 2>&1
     if [[ " ${need[*]} " == *" winrm "* ]]; then
-      "$PM" -y -q install python3-pip >/dev/null 2>&1
-      pip3 install -q pywinrm >/dev/null 2>&1
+      "$PM" -y -q install python3-pip </dev/null >/dev/null 2>&1
+      # a released, pinned pywinrm as a prebuilt wheel - no setup script runs as root
+      pip3 install -q --only-binary :all: "pywinrm==0.5.0" </dev/null >/dev/null 2>&1
     fi
   fi
   python3 -c 'import paramiko' 2>/dev/null || warn "paramiko is missing - SSH hosts (Linux, network devices) cannot be reached"

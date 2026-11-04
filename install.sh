@@ -51,13 +51,15 @@ PLATFORM="${PLATFORM%/}"
 if command -v apt-get >/dev/null; then
   PKG=deb
   say "installing packages (apt)"
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq || die "apt-get update failed"
-  apt-get install -y -qq curl openssl python3 rsyslog stunnel4 snmptrapd snmp >/dev/null || die "package install failed"
+  export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1
+  # </dev/null: no package step may wait at the terminal (see update.sh pkg_install - a hung install)
+  apt-get update -qq </dev/null || die "apt-get update failed"
+  apt-get install -y -qq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+    curl openssl python3 rsyslog stunnel4 snmptrapd snmp </dev/null >/dev/null || die "package install failed"
 elif command -v dnf >/dev/null || command -v yum >/dev/null; then
   PKG=rpm; PM=$(command -v dnf || command -v yum)
   say "installing packages ($PM)"
-  "$PM" install -y -q curl openssl python3 rsyslog stunnel net-snmp net-snmp-utils >/dev/null || die "package install failed"
+  "$PM" install -y -q curl openssl python3 rsyslog stunnel net-snmp net-snmp-utils </dev/null >/dev/null || die "package install failed"
 else
   die "unsupported OS ($PRETTY_NAME) - Debian/Ubuntu or RHEL/Rocky/Alma needed"
 fi

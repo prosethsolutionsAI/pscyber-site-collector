@@ -79,6 +79,9 @@ pscyber-collector site-agent-command   # the command to put Windows/Linux agents
   (v2c community or v3 user) in the SOC platform; the collector polls each one every 60 s
   (UDP 161, from inside your network) for CPU, memory, sessions, uptime and every
   interface's state and traffic. On each device, allow SNMP from the collector's address.
+  From **1.6.0** each device has a type chosen in the SOC platform (brand, product, and
+  firewall / switch / router / wireless controller / access point), which tells the
+  collector whose counters hold CPU and memory - FortiSwitch and Huawei included.
   Credentials are never written to disk on the collector nor put on a command line.
 - **Site Wazuh agents**: install them with `WAZUH_MANAGER=<collector IP>` (the command
   above prints the exact line) - they reach the SOC through the collector.
@@ -95,6 +98,13 @@ keyword), a **DNS lookup** (time and answer), a **TCP port** (connect time) and 
 (*Network health → Synthetic & experience*); the collector runs them on schedule and reports what it
 measured. It uses the standard `ping`, `dig` and `traceroute` tools (installed by `update.sh`), and every
 target reaches them as an argument - never through a shell.
+
+From **1.5.0** a web/API test can also log in (a Bearer token, an API-key header or Basic
+authentication), send GET / HEAD / POST / PUT / PATCH with a request body, and check one value in a
+JSON answer (for example `status` = `UP`). The token or password is held by the SOC platform,
+encrypted; this collector receives it only in its own test list, keeps it in memory, and never writes
+it to disk or into what it reports. Prefer a health endpoint that needs no login; otherwise use a
+dedicated read-only monitoring account or key.
 
 ## Reaching the site's servers (responder)
 

@@ -161,7 +161,9 @@ def decrypt(priv_proto: str, key: bytes, boots: int, etime: int, salt: bytes, da
             from cryptography.hazmat.primitives.ciphers.algorithms import TripleDES
         des, pre_iv = key[:8], key[8:16]
         iv = bytes(a ^ b for a, b in zip(pre_iv, salt))
-        d = Cipher(TripleDES(des * 3), modes.CBC(iv)).decryptor()
+        # NOSONAR below: SNMPv3 "DES" privacy (RFC 3414) IS single DES-CBC - the device chose it; we can only read it.
+        # The SOC tells customers to set AES on their devices; this only decodes traps from ones that still send DES.
+        d = Cipher(TripleDES(des * 3), modes.CBC(iv)).decryptor()  # NOSONAR
         return d.update(data[: len(data) - len(data) % 8]) + d.finalize()
     from cryptography.hazmat.primitives.ciphers.algorithms import AES
     try:                                       # cryptography 46+ moved CFB (gone from `modes` in 49)

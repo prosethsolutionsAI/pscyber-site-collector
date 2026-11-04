@@ -143,10 +143,62 @@ def _cores(out: dict, per_core: dict) -> None:
 
 # --------------------------------------------------------------- one poll
 
-def _vendor_metrics(s: Snmp, oid: str) -> dict:
+FAMILIES = ("fortigate", "fortiswitch", "cisco", "juniper", "paloalto", "huawei", "standard")
+
+
+def _family(oid: str, mib: str) -> str:
+    """Which vendor counters to read: the device type chosen in Agentic (1.6.0), else from its sysObjectID."""
+    if mib in FAMILIES:
+        return mib
+    for prefix, fam in ((".1.3.6.1.4.1.12356.106.", "fortiswitch"), (".1.3.6.1.4.1.12356.", "fortigate"),
+                        (".1.3.6.1.4.1.9.", "cisco"), (".1.3.6.1.4.1.2636.", "juniper"),
+                        (".1.3.6.1.4.1.25461.", "paloalto"), (".1.3.6.1.4.1.2011.", "huawei")):
+        if oid.startswith(prefix):
+            return fam
+    return "standard"
+
+
+def _fortiswitch(s: Snmp, out: dict) -> None:
+    """FORTINET-FORTISWITCH-MIB fsSysInfo: CPU %, memory, disk. Memory is read as a percentage when it is one,
+    otherwise against the capacity."""
+    base = ".1.3.6.1.4.1.12356.106.4.1."
+    g = s.get([base + "2.0", base + "3.0", base + "4.0", base + "5.0", base + "6.0"])
+    cpu, mem, cap = _f(g.get(base + "2.0")), _f(g.get(base + "3.0")), _f(g.get(base + "4.0"))
+    if cpu is not None:
+        out["cpu"] = cpu
+        out["sources"]["cpu"] = "FORTINET-FORTISWITCH-MIB"
+    if mem is not None:
+        out["mem"] = mem if mem <= 100 else (round(100 * mem / cap, 1) if cap else None)
+        if out["mem"] is not None:
+            out["sources"]["mem"] = "FORTINET-FORTISWITCH-MIB"
+        if cap:
+            out["mem_total"] = f"{int(cap) // 1024} MB"
+    used, dcap = _f(g.get(base + "5.0")), _f(g.get(base + "6.0"))
+    if used is not None and dcap:
+        out["disk"] = round(100 * used / dcap, 1)
+
+
+def _huawei(s: Snmp, out: dict) -> None:
+    """HUAWEI-ENTITY-EXTENT-MIB: CPU and memory % per board - the busiest board (the others report 0)."""
+    cpu = [x for x in (_f(v) for v in s.walk(".1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5").values()) if x]
+    mem = [x for x in (_f(v) for v in s.walk(".1.3.6.1.4.1.2011.5.25.31.1.1.1.1.7").values()) if x]
+    if cpu:
+        out["cpu"] = max(cpu)
+        out["sources"]["cpu"] = "HUAWEI-ENTITY-EXTENT-MIB"
+    if mem:
+        out["mem"] = max(mem)
+        out["sources"]["mem"] = "HUAWEI-ENTITY-EXTENT-MIB"
+
+
+def _vendor_metrics(s: Snmp, oid: str, mib: str = "auto") -> dict:
     """CPU / memory / disk / sessions: the vendor's own MIB first, then the standard ones."""
     out: dict = {"sources": {}}
-    if oid.startswith(".1.3.6.1.4.1.12356."):                     # Fortinet (FortiGate)
+    fam = _family(oid, mib)
+    if fam == "fortiswitch":
+        _fortiswitch(s, out)
+    elif fam == "huawei":
+        _huawei(s, out)
+    elif fam == "fortigate":                                      # Fortinet (FortiGate)
         g = s.get([".1.3.6.1.4.1.12356.101.4.1.3.0", ".1.3.6.1.4.1.12356.101.4.1.4.0", ".1.3.6.1.4.1.12356.101.4.1.5.0",
                    ".1.3.6.1.4.1.12356.101.4.1.6.0", ".1.3.6.1.4.1.12356.101.4.1.7.0", ".1.3.6.1.4.1.12356.101.4.1.8.0",
                    ".1.3.6.1.4.1.12356.101.4.1.1.0", ".1.3.6.1.4.1.12356.100.1.1.1.0"])
@@ -166,7 +218,9 @@ def _vendor_metrics(s: Snmp, oid: str) -> dict:
         out["firmware"] = g.get(".1.3.6.1.4.1.12356.101.4.1.1.0") or None
         out["serial"] = g.get(".1.3.6.1.4.1.12356.100.1.1.1.0") or None
         _cores(out, s.walk(".1.3.6.1.4.1.12356.101.4.4.2.1.2"))     # fgProcessorUsage, per core
-    elif oid.startswith(".1.3.6.1.4.1.9."):                       # Cisco
+        if out.get("cpu") is None and out.get("mem") is None:     # no FortiGate counters: perhaps a FortiSwitch
+            _fortiswitch(s, out)
+    elif fam == "cisco":                                          # Cisco
         cpu = _avg(s.walk(".1.3.6.1.4.1.9.9.109.1.1.1.1.8").values()) or _avg(s.walk(".1.3.6.1.4.1.9.9.109.1.1.1.1.5").values())
         if cpu is not None:
             out.update(cpu=cpu, sources={"cpu": "CISCO-PROCESS-MIB"})
@@ -176,7 +230,7 @@ def _vendor_metrics(s: Snmp, oid: str) -> dict:
             if u is not None and f_ is not None and u + f_ > 0:
                 out["mem"] = round(100 * u / (u + f_), 1)
                 out["sources"]["mem"] = "CISCO-MEMORY-POOL-MIB"
-    elif oid.startswith(".1.3.6.1.4.1.2636."):                    # Juniper: the busiest component
+    elif fam == "juniper":                                        # Juniper: the busiest component
         cpu = [x for x in (_f(v) for v in s.walk(".1.3.6.1.4.1.2636.3.1.13.1.8").values()) if x]
         buf = [x for x in (_f(v) for v in s.walk(".1.3.6.1.4.1.2636.3.1.13.1.11").values()) if x]
         if cpu:
@@ -184,7 +238,7 @@ def _vendor_metrics(s: Snmp, oid: str) -> dict:
         if buf:
             out["mem"] = max(buf)
             out["sources"]["mem"] = "JUNIPER-MIB"
-    elif oid.startswith(".1.3.6.1.4.1.25461."):                   # Palo Alto: sessions (CPU/RAM: HOST-RESOURCES)
+    elif fam == "paloalto":                                       # Palo Alto: sessions (CPU/RAM: HOST-RESOURCES)
         g = s.get([".1.3.6.1.4.1.25461.2.1.2.3.3.0"])
         if g.get(".1.3.6.1.4.1.25461.2.1.2.3.3.0") is not None:
             out["sessions"] = _i(g[".1.3.6.1.4.1.25461.2.1.2.3.3.0"])
@@ -253,7 +307,7 @@ def poll(dev: dict) -> dict:
                        "location": sysd["location"], "engine_id": eid},
                "uptime_s": (_i(sysd["uptime"]) or 0) // 100 if sysd["uptime"] else None}
         try:
-            res.update(_vendor_metrics(s, sysd["object_id"] or ""))
+            res.update(_vendor_metrics(s, sysd["object_id"] or "", dev.get("mib") or "auto"))
         except (RuntimeError, subprocess.TimeoutExpired):
             pass
         try:
