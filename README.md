@@ -99,6 +99,14 @@ keyword), a **DNS lookup** (time and answer), a **TCP port** (connect time) and 
 measured. It uses the standard `ping`, `dig` and `traceroute` tools (installed by `update.sh`), and every
 target reaches them as an argument - never through a shell.
 
+**Database tests (1.7.0+)** run one read-only query - PostgreSQL, MySQL / MariaDB, SQL Server, Oracle,
+MongoDB or Redis - with the database's own client on one of *your* hosts (normally the database server
+itself), which the collector logs into exactly as it does for the SOC's checks. Nothing is installed on the
+collector. The query is checked to be a single read (one `SELECT`, or a read-only Redis / MongoDB command) and
+runs in a read-only session, or in a transaction that is rolled back on SQL Server. The database password is
+handed to the client on its input - never on a command line, never written to disk. Use a dedicated
+read-only monitoring account.
+
 From **1.5.0** a web/API test can also log in (a Bearer token, an API-key header or Basic
 authentication), send GET / HEAD / POST / PUT / PATCH with a request body, and check one value in a
 JSON answer (for example `status` = `UP`). The token or password is held by the SOC platform,
@@ -196,6 +204,6 @@ Then ask PSCyber to revoke the collector in the SOC platform.
 | `responder.py` | Checks the site's hosts and runs the SOC's commands and approved playbooks on them (SSH / WinRM / Ansible) |
 | `snmp_poller.py` | SNMP polling of the network devices set up in the SOC platform (CPU, memory, interfaces) |
 | `snmp_traps.py` | SNMP trap receiver on UDP 162 (v1 / v2c / informs / v3) |
-| `synthetic.py` | Synthetic tests: ping, web, DNS, TCP port, path hop by hop (1.4.0+) |
+| `synthetic.py` | Synthetic tests: ping, web, DNS, TCP port, path hop by hop (1.4.0+); database queries (1.7.0+) |
 | `o365.sh` | Optional: fetch the customer's Microsoft 365 audit logs (asks for the secret, tests first) |
 | `VERSION` | Collector version |
